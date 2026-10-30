@@ -1,0 +1,7 @@
+{
+  "api": "https://playagentcards.com",
+  "cards": "",
+  "pool": "",
+  "rpc": "https://bsc-rpc.publicnode.com",
+  "chainId": 56
+}

@@ -1,0 +1,11 @@
+# Every text file is stored and checked out with LF line endings, on Windows too: the skill package is built from these
+# files, and a "#!/usr/bin/env node\r" first line stops kart on Linux and macOS.
+* text=auto eol=lf
+*.tgz -text
+*.jpg -text
+*.png -text
+*.mp4 -text
+*.ttf -text
+*.woff -text
+*.woff2 -text
+*.ico -text
