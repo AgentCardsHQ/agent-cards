@@ -1,6 +1,6 @@
 {
   "name": "agent-cards",
-  "version": "0.16.9",
+  "version": "0.17.0",
   "private": true,
   "description": "Agent Cards: the contracts and the kart CLI, as deployed and shipped",
   "license": "MIT",

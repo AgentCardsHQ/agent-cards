@@ -21,6 +21,7 @@ module.exports = {
   },
   networks: {
     hardhat: { ...fork, chains: { 56: { hardforkHistory: { cancun: 0 } } } },
+    bsc: { url: "https://bsc-rpc.publicnode.com", chainId: 56 }, // only for `hardhat verify` of the mainnet contracts
     bscTestnet: {
       url: "https://data-seed-prebsc-1-s1.bnbchain.org:8545",
       chainId: 97,

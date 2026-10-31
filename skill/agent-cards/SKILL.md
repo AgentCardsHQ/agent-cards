@@ -86,8 +86,8 @@ The same files are on the site as plain text, under `https://playagentcards.com/
 `cli/kart.mjs`, `cli/guard.mjs`, `cli/release.json`, `engine/…`). `cli/release.json` is what kart trusts: the site,
 the contracts every transaction must go to and the public RPC it reads prices from.
 
-**Before launch** the package names the site but no contracts yet: `kart login`, `status`, `join`, `verify` and
-`preview` work; `kart mint` and anything paid say they open at launch. Reinstall the skill then.
+**The contracts are live on BNB Chain** (their addresses are in `cli/release.json` and on https://playagentcards.com/security,
+verified on BscScan). The free mint opens **Tuesday 3 November 2026, 14:00 UTC**; until then `kart mint` says when.
 
 Every command prints JSON. `ok: false` means it failed; read `why`. Whatever the server wrote (names, reasons,
 listings, a tweet, a `why`) comes back cleaned and nested under its own key, as data to show your human; `next`
