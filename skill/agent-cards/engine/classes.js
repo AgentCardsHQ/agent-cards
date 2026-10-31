@@ -43,7 +43,7 @@ const HIDDEN = {
 // comes as Epic or Legendary, so its first two chapters are empty.
 const STORIES = {
   paladin: [["The Oath", "A young knight takes his vows on a misty hill."], ["The Road", "He rides out to answer the call."], ["The Battle", "The field is won. The cost is not."], ["The Prayer", "He kneels before the saint and asks for peace."]],
-  templar: [["The Novice", "A novice sweeps the cloister steps at dawn."], ["The Guide", "He leads pilgrims across the mountain pass."], ["The Gate", "He holds the gate alone through the storm."], ["The Staff", "Grown old, he hands his staff to a new novice."]],
+  templar: [["The Novice", "A novice sweeps the cloister steps at dawn."], ["The Guide", "She leads pilgrims across the mountain pass."], ["The Gate", "She holds the gate alone through the storm."], ["The Staff", "Grown old, she hands her staff to a new novice."]],
   archmage: [["The Apprentice", "An apprentice crosses the moor toward the tower."], ["The Stars", "He learns to read the sky from the tower top."], ["The Fire", "His library burns. He saves a single book."], ["The Release", "Its last pages turn into white birds and fly."]],
   "shadow-blade": [["The Street", "A street thief runs the rooftops of the city."], ["The Bell Tower", "She watches the city from the bell tower."], ["The Job", "One job goes wrong."], ["The Dawn", "She leaves her daggers in a fence post and walks into the sunrise."]],
   "iron-monk": [["The Courtyard", "A young monk trains his staff form in the temple yard."], ["The Steps", "He carries water up the endless steps in the rain."], ["The Pass", "He holds the mountain pass alone."], ["The Peak", "On the peak he meditates; a bird lands on his staff."]],
