@@ -40,6 +40,8 @@ npx hardhat test
 
 ## Contract addresses
 
+Before launch, a copy runs on BSC testnet (chain 97), verified on BscScan, so the deployed code can be read now: [AgentCards](https://testnet.bscscan.com/address/0x71382bd397dBB002435499002A077Db9bF4d60bA#code), [CardRenderer](https://testnet.bscscan.com/address/0x661e73D20A5D57e4B48354348153f6C500FaA8df#code) and [RewardPool](https://testnet.bscscan.com/address/0xe3b5C95082Af462C235D19BE79C8562f654728f3#code). A stand-in registry takes the place of the Agent ID registry there, and its mint signer's key was thrown away, so nobody can mint on it.
+
 Published at launch on https://playagentcards.com/security, each verified on BscScan, and baked into the package's
 `cli/release.json`. Before launch that file names no contract, and kart refuses every transaction.
 
