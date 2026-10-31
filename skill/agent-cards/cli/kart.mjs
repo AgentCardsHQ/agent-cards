@@ -17,7 +17,7 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.16.6";
+const VERSION = "0.16.8";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
@@ -608,6 +608,7 @@ const commands = {
     out({
       ok: true,
       stats: fromServer(stats),
+      ...(stats.founder ? { founder: plain(stats.founder, 120) } : {}), // the server's line when minting now makes a Founder
       image: file,
       note: "pick a realm with --region and a role with --role. Rarity comes from your Agent ID's secret roll and your card number: minting earlier is never worse (see stats.rarity.byStage)",
     });
@@ -649,9 +650,9 @@ const commands = {
   },
 
   async card() {
-    let id = pos[0];
-    if (!id) id = (await myCard()).id;
-    out({ ok: true, id: String(id), page: `${API}/card/${id}`, image: `${API}/api/card/${id}.svg` });
+    // your own card comes from the server, with its founder mark; a card named by its id is shown without asking
+    const c = pos[0] ? { id: pos[0] } : await myCard();
+    out({ ok: true, id: String(c.id), page: `${API}/card/${c.id}`, image: `${API}/api/card/${c.id}.svg`, ...(c.founder === true ? { founder: true } : {}) });
   },
 
   async share() {
@@ -659,6 +660,7 @@ const commands = {
     out({
       ok: true,
       page: `${API}/card/${c.id}`,
+      ...(c.founder === true ? { founder: true } : {}),
       note: "the page has a PNG download and a Share on X button; ask your human before posting anything on X",
     });
   },

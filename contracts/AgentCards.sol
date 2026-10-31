@@ -45,6 +45,9 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     /// Genesis is the first 10,000 Agent ID cards (card numbers 1 to 10,000), a number nothing can change. Each further
     /// 10,000 cards is the next series (Series 2 from card 10,001), minted free the same way.
     uint256 public constant GENESIS_SUPPLY = 10_000;
+    /// Founders are the first 1,000 Agent ID cards (card numbers 1 to 1,000), a smaller mark inside Genesis that
+    /// nothing can change either.
+    uint256 public constant FOUNDERS = 1_000;
     uint8 private constant MYTHIC = 4; // the rarity of Mythic cards
     uint256 private constant MAX_COPIES = 999; // per design, so copy numbers fit the id scheme
     uint256 private constant MAX_MYTHIC_NAME = 32;
@@ -386,6 +389,11 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     function seriesOf(uint256 id) public pure returns (uint256) {
         if (id == 0 || id >= MYTHIC_BASE) return 0;
         return (id - 1) / GENESIS_SUPPLY + 1;
+    }
+
+    /// Whether card `id` is a Founder: true for card numbers 1 to 1,000, false for every later card and a Mythic id.
+    function isFounder(uint256 id) public pure returns (bool) {
+        return id != 0 && id <= FOUNDERS;
     }
 
     /// Every card in existence: Agent ID cards (totalSupply) plus all Mythic copies sold or awarded.

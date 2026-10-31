@@ -19,6 +19,8 @@ contract CardRenderer is ICardRenderer, Ownable2Step {
     uint256 public constant TIMELOCK = 48 hours;
     /// AgentCards.seriesOf's rule: the first 10,000 Agent ID cards are Genesis, each further 10,000 the next series.
     uint256 private constant GENESIS_SUPPLY = 10_000;
+    /// AgentCards.isFounder's rule: the first 1,000 Agent ID cards are Founders.
+    uint256 private constant FOUNDERS = 1_000;
     uint256 private constant MAX_LINK = 200;
 
     struct Links {
@@ -200,9 +202,10 @@ contract CardRenderer is ICardRenderer, Ownable2Step {
             '"}'
         );
         if (e.number == 0) {
-            // an Agent ID card: Genesis for card numbers 1 to 10,000, then Series 2, 3, ...
+            // an Agent ID card: Genesis for card numbers 1 to 10,000, then Series 2, 3, ...; Founder for 1 to 1,000
             uint256 series = (id - 1) / GENESIS_SUPPLY + 1;
             a = string.concat(a, ',{"trait_type":"Series","value":"', series == 1 ? "Genesis" : string.concat("Series ", series.toString()), '"}');
+            if (id <= FOUNDERS) a = string.concat(a, ',{"trait_type":"Founder","value":"Yes"}');
         } else {
             a = string.concat(
                 a,

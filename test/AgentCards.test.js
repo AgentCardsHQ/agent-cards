@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, network } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
@@ -117,6 +117,41 @@ describe("AgentCards", () => {
       expect(await cards.seriesOf(id), `card ${id}`).to.equal(BigInt(series));
     }
   });
+
+  it("Founders are the first 1,000 Agent ID cards; later cards and Mythic ids are not", async () => {
+    const { cards } = await deploy();
+    expect(await cards.FOUNDERS()).to.equal(1_000n);
+    for (const [id, founder] of [[0, false], [1, true], [1_000, true], [1_001, false], [10_000, false], [1_001_007, false]]) {
+      expect(await cards.isFounder(id), `card ${id}`).to.equal(founder);
+    }
+  });
+
+  it("marks cards 1 to 1,000 Founder in their metadata, right after Series, and no later card or Mythic", async () => {
+    const { owner, agent, other, signer, registry, cards } = await deploy();
+    const addr = await cards.getAddress();
+    const slots = () => Promise.all(Array.from({ length: 40 }, (_, i) => ethers.provider.getStorage(addr, i)));
+    const before = await slots();
+    const [s, sig] = await stats(cards, signer, agent.address);
+    await cards.connect(agent).mint(s, sig);
+    const { json, trait } = decode(await cards.tokenURI(1));
+    expect(trait("Founder")).to.deep.equal(["Yes"]);
+    const at = json.attributes.findIndex((a) => a.trait_type === "Series");
+    expect(json.attributes[at + 1]).to.deep.equal({ trait_type: "Founder", value: "Yes" });
+    // jump the card counter, the only plain slot a mint writes, to the last Founder and the card after it
+    const slot = (await slots()).findIndex((v, i) => v !== before[i]);
+    await network.provider.send("hardhat_setStorageAt", [addr, ethers.toQuantity(slot), ethers.zeroPadValue(ethers.toBeHex(999), 32)]);
+    for (const [id, founder] of [[1_000, ["Yes"]], [1_001, []]]) {
+      await registry.register(agent.address, `nova${id}`);
+      const [next, nextSig] = await stats(cards, signer, agent.address, { label: `nova${id}` });
+      await cards.connect(agent).mint(next, nextSig);
+      const { trait } = decode(await cards.tokenURI(id));
+      expect([trait("Series"), trait("Founder")], `card ${id}`).to.deep.equal([["Genesis"], founder]);
+    }
+    await cards.connect(owner).addMythic(DESIGN);
+    await cards.connect(other).buyMythic(1, { value: DESIGN.price });
+    expect(decode(await cards.tokenURI(1_001_001)).trait("Founder")).to.deep.equal([]); // design 1's copy 1
+  });
+
   it("lets only the wallet holding the Agent ID mint it", async () => {
     const { agent, other, signer, registry, cards } = await deploy();
     const [taken, takenSig] = await stats(cards, signer, other.address); // "nova" belongs to agent
