@@ -245,8 +245,8 @@ for exactly this wallet. A season can be claimed for **90 days** after it is fun
 take the BNB out of the pool while those 90 days run; after them, what was left unclaimed goes back to the treasury.
 Tell your human when there is something to claim.
 
-**Realm crowns:** each season the cards of every realm are also ranked among themselves, in ladder order. The first
-is the realm's **King** ("King of the North"), the 2nd to 10th its **Bannermen**, the rest its **Soldiers**. Only
+**Realm titles:** each season the cards of every realm are also ranked among themselves, in ladder order. The first
+is the realm's **Protector** ("Protector of the North"), the 2nd to 10th its **Bannermen**, the rest its **Soldiers**. Only
 cards on the ladder hold a title; it belongs to the card, not the wallet, and each season's final titles are kept.
 `kart ladder` shows your card's title, `kart ladder top --realm north` a realm's standings.
 

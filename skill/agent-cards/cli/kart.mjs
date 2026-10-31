@@ -17,7 +17,7 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.16.5";
+const VERSION = "0.16.6";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
@@ -488,12 +488,12 @@ const commands = {
         "kart match [<match-id>] [--log]": "a duel's state for picking a move: round, seconds left, HP %, Focus, the last round, the opponent's last 3 moves. Without an id: your live duel",
         "kart turn <move|mix> [--reason TEXT] [--match ID]": "lock in this round's move within 30 s: strike, guard, break, charge, skill, or a mix like guard:60,break:40. Waits for the round, then prints it and what's next",
         "kart replay <match-id>": "re-play a finished duel on this machine from its revealed seed and check the server's log",
-        "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (King, Bannerman or Soldier of its realm), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB) and your card's place among the cards that share it",
+        "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (Protector, Bannerman or Soldier of its realm), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB) and your card's place among the cards that share it",
         "kart pool": "the season pool payouts this wallet can claim from the RewardPool contract: season, BNB, cards and until when (90 days from funding)",
         "kart pool claim [--season N] [--yes]": "simulate claiming this wallet's season pool BNB (gas only; the amount's proof is checked against the root on chain); --yes sends it",
         "kart ladder join [--card ID]": "enter your card in the ranked ladder (one card per owner): its rule program plays a ranked duel every 4 hours",
         "kart ladder leave": "take your card off the ladder",
-        "kart ladder top [--n 20] [--realm REALM]": "the leaderboard with each card's realm title; --realm west|east|north|south shows that realm's standings, its first card being its King",
+        "kart ladder top [--n 20] [--realm REALM]": "the leaderboard with each card's realm title; --realm west|east|north|south shows that realm's standings, its first card being its Protector",
         "kart quests [--card ID]": "today's three quests (scout, tinker, duel): each pays XP once a day and completes on its own",
         "kart shop": "prices: fight packs (10 fights; the big pack is 4 packs for 50), the season pass (10 extra fights a day for 14 days) and the market fee. Once cards exist, a price changes only 48 hours after it is proposed on chain. Holo and frames are never sold",
         "kart holo": "how Holo is earned: it can't be bought (the season's top 100 on the ladder, the wheel, the first 100 verified pre-registrations, and the top 10 inviters when minting opens)",
@@ -1134,7 +1134,7 @@ const commands = {
     const sub = pos[0] || "status";
     if (sub === "top") {
       const n = Math.max(1, Math.min(100, Number(flags.n) || 20));
-      // --realm: that realm's cards only, in ladder order; its first is the realm's King
+      // --realm: that realm's cards only, in ladder order; its first is the realm's Protector
       const realm = flags.realm === undefined ? null : regionNumber(flags.realm);
       if (flags.realm !== undefined && realm === null) die(`${plain(flags.realm, 24)} is not a realm: --realm west|east|north|south`);
       const slug = realm === null ? "" : REGION_NAMES[realm];
@@ -1147,7 +1147,7 @@ const commands = {
         cards: Number(j.cards),
         ...(name ? { realm: name } : {}),
         top: j.standings.map((r) => `#${Number(r.rank)} ${plain(r.name)} (card ${safeCardId(r.card)}, ${plain(r.className, 32)}, L${Number(r.level)}): ${Number(r.rating)} ${plain(r.league, 16)}, ${Number(r.record.wins)}-${Number(r.record.losses)}-${Number(r.record.draws)}${r.title ? `, ${plain(r.title, 32)}` : ""}`),
-        ...(name && !j.standings.length ? { note: `the ${name} has no King yet: its first card on the ladder takes the crown` } : {}),
+        ...(name && !j.standings.length ? { note: `the ${name} has no Protector yet: its first card on the ladder becomes its Protector` } : {}),
         page: `${API}/ladder${slug ? `?realm=${slug}` : ""}`,
       });
     }
@@ -1180,7 +1180,7 @@ const commands = {
       card: safeCardId(j.card),
       inLadder: !!j.inLadder,
       ...(j.inLadder ? { rating: Number(j.rating), league: plain(j.league, 16), rank: Number(j.rank), best: Number(j.best), record: fromServer(j.record) } : {}),
-      // its realm title (King, Bannerman or Soldier of its realm) and its place among its realm's cards
+      // its realm title (Protector, Bannerman or Soldier of its realm) and its place among its realm's cards
       ...(j.inLadder && j.title ? { title: plain(j.title, 32), realmRank: Number(j.realmRank) } : {}),
       level: Number(j.progress.level),
       xp: `${Number(j.progress.xp)}/${Number(j.progress.xpToNext)}`,
