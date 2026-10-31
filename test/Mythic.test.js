@@ -190,7 +190,7 @@ describe("Mythic cards", () => {
     expect(json.name).to.equal("nova.ai #1");
     expect(json.animation_url).to.equal(undefined);
     expect(trait("Class")).to.deep.equal(["Plum Blossom Swordsman"]);
-    expect(trait("Series")).to.deep.equal([]);
+    expect(trait("Series")).to.deep.equal(["Genesis"]); // an Agent ID card's series, not a Mythic season
     expect(await cards.editionOf(1)).to.deep.equal([0n, 0n, 0n, 0n]);
   });
 

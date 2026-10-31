@@ -42,6 +42,9 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     /// Mythic cards have their own ids, MYTHIC_BASE + design * 1,000 + copy number (design 1's copy 7 is 1,001,007),
     /// so they never take the early card numbers that decide the mint's rarity odds. Agent ID cards stay below it.
     uint256 public constant MYTHIC_BASE = 1_000_000;
+    /// Genesis is the first 10,000 Agent ID cards (card numbers 1 to 10,000), a number nothing can change. Each further
+    /// 10,000 cards is the next series (Series 2 from card 10,001), minted free the same way.
+    uint256 public constant GENESIS_SUPPLY = 10_000;
     uint8 private constant MYTHIC = 4; // the rarity of Mythic cards
     uint256 private constant MAX_COPIES = 999; // per design, so copy numbers fit the id scheme
     uint256 private constant MAX_MYTHIC_NAME = 32;
@@ -377,6 +380,12 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     function tokenURI(uint256 id) public view override returns (string memory) {
         _requireOwned(id);
         return renderer.tokenURI(id, _cards[id], _edition(id));
+    }
+
+    /// The series an Agent ID card belongs to: 1 is Genesis, 2 the next 10,000 cards, and so on; 0 for a Mythic id.
+    function seriesOf(uint256 id) public pure returns (uint256) {
+        if (id == 0 || id >= MYTHIC_BASE) return 0;
+        return (id - 1) / GENESIS_SUPPLY + 1;
     }
 
     /// Every card in existence: Agent ID cards (totalSupply) plus all Mythic copies sold or awarded.

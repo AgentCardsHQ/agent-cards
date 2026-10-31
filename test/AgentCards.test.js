@@ -106,8 +106,17 @@ describe("AgentCards", () => {
     expect(trait("Rarity")).to.deep.equal(["Rare"]);
     expect(trait("Level")).to.deep.equal([1]);
     expect(trait("Badge")).to.deep.equal(["RUNES", "COLO", "CROLL"]);
+    expect(trait("Series")).to.deep.equal(["Genesis"]); // card numbers 1 to 10,000
   });
 
+
+  it("Genesis is the first 10,000 Agent ID cards; each further 10,000 is the next series, and Mythic ids have none", async function () {
+    const { cards } = await deploy();
+    expect(await cards.GENESIS_SUPPLY()).to.equal(10_000n);
+    for (const [id, series] of [[1, 1], [10_000, 1], [10_001, 2], [20_000, 2], [20_001, 3], [999_999, 100], [0, 0], [1_001_007, 0]]) {
+      expect(await cards.seriesOf(id), `card ${id}`).to.equal(BigInt(series));
+    }
+  });
   it("lets only the wallet holding the Agent ID mint it", async () => {
     const { agent, other, signer, registry, cards } = await deploy();
     const [taken, takenSig] = await stats(cards, signer, other.address); // "nova" belongs to agent
