@@ -17,7 +17,7 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.16.8";
+const VERSION = "0.16.9";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
@@ -488,7 +488,7 @@ const commands = {
         "kart match [<match-id>] [--log]": "a duel's state for picking a move: round, seconds left, HP %, Focus, the last round, the opponent's last 3 moves. Without an id: your live duel",
         "kart turn <move|mix> [--reason TEXT] [--match ID]": "lock in this round's move within 30 s: strike, guard, break, charge, skill, or a mix like guard:60,break:40. Waits for the round, then prints it and what's next",
         "kart replay <match-id>": "re-play a finished duel on this machine from its revealed seed and check the server's log",
-        "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (Protector, Bannerman or Soldier of its realm), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB) and your card's place among the cards that share it",
+        "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (Protector, Bannerman or Soldier of its realm), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB, plus the project's 0.5 BNB in Season 1) and your card's place among the cards that share it",
         "kart pool": "the season pool payouts this wallet can claim from the RewardPool contract: season, BNB, cards and until when (90 days from funding)",
         "kart pool claim [--season N] [--yes]": "simulate claiming this wallet's season pool BNB (gas only; the amount's proof is checked against the root on chain); --yes sends it",
         "kart ladder join [--card ID]": "enter your card in the ranked ladder (one card per owner): its rule program plays a ranked duel every 4 hours",
@@ -1172,8 +1172,9 @@ const commands = {
     const card = cardFlag() || String((await api("GET", `/api/me?name=${encodeURIComponent(a.name)}`)).card?.id || "");
     if (!card) die("no card yet: run kart mint");
     const j = await api("GET", `/api/ladder/card/${card}`);
-    // the season pool: this season's 80% of revenue so far and this card's rank among the cards that qualify (the split
-    // by rank is published before Season 1 begins, so no estimate per card yet)
+    // the season pool: this season's 80% of revenue so far, plus the project's seed if the season has one (Season 1), and
+    // this card's rank among the cards that qualify (the split by rank is published before Season 1 begins, so no
+    // estimate per card yet)
     const pj = await api("GET", `/api/pool?card=${encodeURIComponent(card)}`, null, true); // soft: an older server has no pool
     const p = pj && pj.ok !== false ? pj : null;
     const where = (m) => (m.kind === "ladder" || !m.kind ? `round ${Number(m.round)}` : m.kind === "paid" ? "paid fight" : "challenge");
@@ -1190,7 +1191,7 @@ const commands = {
       nextRound: plain(j.nextRound, 32),
       ...(p?.pool
         ? {
-          pool: `${plain(p.pool.bnb, 24)} BNB this season (${plain(p.pool.share, 8)} of revenue so far), shared by final rank among the ${Number(p.qualifying)} cards with ${Number(p.minMatches)}+ ladder-round matches: the higher the rank, the bigger the share (the exact split is published before Season 1 begins)`,
+          pool: `${plain(p.pool.bnb, 24)} BNB this season (${p.pool.seed && p.pool.seed.wei !== "0" ? `${plain(p.pool.seed.bnb, 24)} BNB from the project plus ` : ""}${plain(p.pool.share, 8)} of revenue so far), shared by final rank among the ${Number(p.qualifying)} cards with ${Number(p.minMatches)}+ ladder-round matches: the higher the rank, the bigger the share (the exact split is published before Season 1 begins)`,
           yourShare: p.card?.qualifies
             ? `rank ${Number(p.card.rank)} of ${Number(p.qualifying)} now; it changes until the season ends`
             : `none yet: ${plain(p.card?.why || "not qualified", 120)} (${Number(p.card?.matches ?? 0)} so far)`,
