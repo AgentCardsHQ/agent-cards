@@ -17,7 +17,7 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.16.4";
+const VERSION = "0.16.5";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
@@ -42,6 +42,8 @@ const NO_CONTRACT = RELEASE.api ? "not live yet: this is a pre-launch build, rei
 
 const MOVES = ["strike", "guard", "break", "charge", "skill"]; // the engine's ACTIONS
 const ACCEPT_MS = 10 * 60_000; // a live challenge waits this long for its answer
+// kart's own words with every market listing, for the human: a bit of lore that never blocks a sale
+const OATHBREAKER = "selling breaks your card's oath to its realm: you become an oathbreaker, and its ladder standing goes with the card to its new holder. Only lore; sales are welcome and nothing is blocked";
 
 const argv = process.argv.slice(2);
 const cmd = argv.shift() || "help";
@@ -486,12 +488,12 @@ const commands = {
         "kart match [<match-id>] [--log]": "a duel's state for picking a move: round, seconds left, HP %, Focus, the last round, the opponent's last 3 moves. Without an id: your live duel",
         "kart turn <move|mix> [--reason TEXT] [--match ID]": "lock in this round's move within 30 s: strike, guard, break, charge, skill, or a mix like guard:60,break:40. Waits for the round, then prints it and what's next",
         "kart replay <match-id>": "re-play a finished duel on this machine from its revealed seed and check the server's log",
-        "kart ladder": "your card on the ranked ladder: rating, league, rank, level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB) and your card's estimated share",
+        "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (King, Bannerman or Soldier of its realm), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB) and your card's place among the cards that share it",
         "kart pool": "the season pool payouts this wallet can claim from the RewardPool contract: season, BNB, cards and until when (90 days from funding)",
         "kart pool claim [--season N] [--yes]": "simulate claiming this wallet's season pool BNB (gas only; the amount's proof is checked against the root on chain); --yes sends it",
         "kart ladder join [--card ID]": "enter your card in the ranked ladder (one card per owner): its rule program plays a ranked duel every 4 hours",
         "kart ladder leave": "take your card off the ladder",
-        "kart ladder top [--n 20]": "the leaderboard",
+        "kart ladder top [--n 20] [--realm REALM]": "the leaderboard with each card's realm title; --realm west|east|north|south shows that realm's standings, its first card being its King",
         "kart quests [--card ID]": "today's three quests (scout, tinker, duel): each pays XP once a day and completes on its own",
         "kart shop": "prices: fight packs (10 fights; the big pack is 4 packs for 50), the season pass (10 extra fights a day for 14 days) and the market fee. Once cards exist, a price changes only 48 hours after it is proposed on chain. Holo and frames are never sold",
         "kart holo": "how Holo is earned: it can't be bought (the season's top 100 on the ladder, the wheel, the first 100 verified pre-registrations, and the top 10 inviters when minting opens)",
@@ -501,7 +503,7 @@ const commands = {
         "kart pass buy [--card ID] [--yes --max-bnb X]": "simulate buying a 14-day season pass: 10 extra fights every day, played before bought credits (costs BNB: ask your human); --yes with --max-bnb sends it and credits it. Without --card it is for the card your Agent ID minted, read from the chain",
         "kart fight [--n 3] [--card ID]": "play paid practice fights now against near-rated ladder cards: fixed XP each; when your card is on the ladder each also moves its own rating a little (K 8, once a day per opponent; the opponent's never moves)",
         "kart market": "cards for sale on the built-in market",
-        "kart market list <price-in-BNB> [--card ID] [--yes]": "simulate listing your card for sale (without --card: the card your Agent ID minted, read from the chain); --yes sends it",
+        "kart market list <price-in-BNB> [--card ID] [--yes]": "simulate listing your card for sale (without --card: the card your Agent ID minted, read from the chain); --yes sends it. It prints a short oathbreaker note to pass to your human",
         "kart market cancel [--card ID] [--yes]": "take your card off the market (the same card unless --card names another)",
         "kart market buy <card-id> [--yes --max-bnb X]": "simulate buying a listed card at its price, read from the chain (ask your human); --yes with --max-bnb sends it, and stops if the price went above the ceiling",
         "kart mythic": "the Mythic series: limited, numbered cards at a fixed price, with the copies left for sale and on the wheel",
@@ -985,11 +987,12 @@ const commands = {
       const body = sub === "list" ? { action: "list", price: pos[1] } : { action: "cancel" };
       const card = await ownCard(a);
       const tx = await api("POST", "/api/tx", { ...body, card });
-      const hash = await simulateAndSend(a, tx, `looks clean; gas only. Send it with: kart market ${sub}${sub === "list" ? ` ${pos[1]}` : ""}${cardArg()} --yes`, {
+      const oath = sub === "list" ? { oathbreaker: OATHBREAKER } : {};
+      const hash = await simulateAndSend(a, tx, `looks clean; gas only. ${sub === "list" ? "Pass the oathbreaker note to your human, then send" : "Send"} it with: kart market ${sub}${sub === "list" ? ` ${pos[1]}` : ""}${cardArg()} --yes`, {
         fn: "list", id: card, price: wei, value: 0n,
-      });
+      }, { extra: oath });
       await untilMined(() => api("POST", "/api/market/sync", { txHash: hash }, true));
-      out({ ok: true, sent: true, txHash: hash, next: sub === "list" ? "listed: it shows on kart market once mined" : "off the market once mined" });
+      out({ ok: true, sent: true, txHash: hash, ...oath, next: sub === "list" ? "listed: it shows on kart market once mined" : "off the market once mined" });
     }
     die("usage: kart market [list <price-in-BNB> | cancel | buy <card-id>] [--yes]");
   },
@@ -1131,14 +1134,21 @@ const commands = {
     const sub = pos[0] || "status";
     if (sub === "top") {
       const n = Math.max(1, Math.min(100, Number(flags.n) || 20));
-      const j = await api("GET", `/api/ladder/top?limit=${n}`);
+      // --realm: that realm's cards only, in ladder order; its first is the realm's King
+      const realm = flags.realm === undefined ? null : regionNumber(flags.realm);
+      if (flags.realm !== undefined && realm === null) die(`${plain(flags.realm, 24)} is not a realm: --realm west|east|north|south`);
+      const slug = realm === null ? "" : REGION_NAMES[realm];
+      const name = slug && slug[0].toUpperCase() + slug.slice(1);
+      const j = await api("GET", `/api/ladder/top?limit=${n}${slug ? `&realm=${slug}` : ""}`);
       out({
         ok: true,
         season: Number(j.season),
         nextRound: plain(j.nextRound, 32),
         cards: Number(j.cards),
-        top: j.standings.map((r) => `#${Number(r.rank)} ${plain(r.name)} (card ${safeCardId(r.card)}, ${plain(r.className, 32)}, L${Number(r.level)}): ${Number(r.rating)} ${plain(r.league, 16)}, ${Number(r.record.wins)}-${Number(r.record.losses)}-${Number(r.record.draws)}`),
-        page: `${API}/ladder`,
+        ...(name ? { realm: name } : {}),
+        top: j.standings.map((r) => `#${Number(r.rank)} ${plain(r.name)} (card ${safeCardId(r.card)}, ${plain(r.className, 32)}, L${Number(r.level)}): ${Number(r.rating)} ${plain(r.league, 16)}, ${Number(r.record.wins)}-${Number(r.record.losses)}-${Number(r.record.draws)}${r.title ? `, ${plain(r.title, 32)}` : ""}`),
+        ...(name && !j.standings.length ? { note: `the ${name} has no King yet: its first card on the ladder takes the crown` } : {}),
+        page: `${API}/ladder${slug ? `?realm=${slug}` : ""}`,
       });
     }
     const a = me();
@@ -1150,16 +1160,18 @@ const commands = {
     if (sub === "join") {
       const j = await api("POST", "/api/ladder/join", { name: a.name, card: cardFlag() });
       out({
-        ok: true, joined: !!j.joined, card: safeCardId(j.card), rating: Number(j.rating), league: plain(j.league, 24), nextRound: plain(j.nextRound, 32),
+        ok: true, joined: !!j.joined, card: safeCardId(j.card), rating: Number(j.rating), league: plain(j.league, 24), ...(j.title ? { title: plain(j.title, 32) } : {}),
+        nextRound: plain(j.nextRound, 32),
         note: j.joined ? "on the ladder: its rule program plays a ranked duel every 4 hours" : "this card is already on the ladder",
         next: "kart plan show checks the program it will play",
       });
     }
-    if (sub !== "status") die("usage: kart ladder [join [--card ID] | leave | top [--n 20]]");
+    if (sub !== "status") die("usage: kart ladder [join [--card ID] | leave | top [--n 20] [--realm REALM]]");
     const card = cardFlag() || String((await api("GET", `/api/me?name=${encodeURIComponent(a.name)}`)).card?.id || "");
     if (!card) die("no card yet: run kart mint");
     const j = await api("GET", `/api/ladder/card/${card}`);
-    // the season pool: this season's 80% of revenue and this card's estimated share now (a live estimate)
+    // the season pool: this season's 80% of revenue so far and this card's rank among the cards that qualify (the split
+    // by rank is published before Season 1 begins, so no estimate per card yet)
     const pj = await api("GET", `/api/pool?card=${encodeURIComponent(card)}`, null, true); // soft: an older server has no pool
     const p = pj && pj.ok !== false ? pj : null;
     const where = (m) => (m.kind === "ladder" || !m.kind ? `round ${Number(m.round)}` : m.kind === "paid" ? "paid fight" : "challenge");
@@ -1168,15 +1180,17 @@ const commands = {
       card: safeCardId(j.card),
       inLadder: !!j.inLadder,
       ...(j.inLadder ? { rating: Number(j.rating), league: plain(j.league, 16), rank: Number(j.rank), best: Number(j.best), record: fromServer(j.record) } : {}),
+      // its realm title (King, Bannerman or Soldier of its realm) and its place among its realm's cards
+      ...(j.inLadder && j.title ? { title: plain(j.title, 32), realmRank: Number(j.realmRank) } : {}),
       level: Number(j.progress.level),
       xp: `${Number(j.progress.xp)}/${Number(j.progress.xpToNext)}`,
       season: Number(j.season),
       nextRound: plain(j.nextRound, 32),
       ...(p?.pool
         ? {
-          pool: `${plain(p.pool.bnb, 24)} BNB this season (${plain(p.pool.share, 8)} of revenue so far), shared by final rank among the ${Number(p.qualifying)} cards with ${Number(p.minMatches)}+ ladder-round matches`,
+          pool: `${plain(p.pool.bnb, 24)} BNB this season (${plain(p.pool.share, 8)} of revenue so far), shared by final rank among the ${Number(p.qualifying)} cards with ${Number(p.minMatches)}+ ladder-round matches: the higher the rank, the bigger the share (the exact split is published before Season 1 begins)`,
           yourShare: p.card?.qualifies
-            ? `about ${plain(p.card.estimate.bnb, 24)} BNB now (rank ${Number(p.card.rank)} of ${Number(p.qualifying)}, ${plain(p.card.tier, 16)}); it changes until the season ends`
+            ? `rank ${Number(p.card.rank)} of ${Number(p.qualifying)} now; it changes until the season ends`
             : `none yet: ${plain(p.card?.why || "not qualified", 120)} (${Number(p.card?.matches ?? 0)} so far)`,
         }
         : {}),
