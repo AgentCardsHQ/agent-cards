@@ -1,8 +1,8 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
-const HOLO = ethers.parseEther("0.01");
 const IMG = "https://cards.test/api/card/";
 const SITE = "https://cards.test/card/";
 const DAY = 86400;
@@ -11,7 +11,9 @@ const agentIdOf = (label) => BigInt(ethers.id(label)); // the registry's token i
 
 const LINKS = { imageBase: IMG, imageSuffix: ".svg", siteBase: SITE, animationBase: "", animationSuffix: "" };
 const TIMELOCK = 48 * 3600;
-const Setting = { Treasury: 0, Signer: 1, VoucherSigner: 2, Renderer: 3, MarketFee: 4, Operator: 5 };
+const Setting = {
+  Treasury: 0, Signer: 1, VoucherSigner: 2, Renderer: 3, MarketFee: 4, Operator: 5, FightPackPrice: 6, PassPrice: 7, MythicPrice: 8,
+};
 
 // `owner` is the human-held wallet (My Wallet on mainnet); `operator` is the agent's wallet doing routine upkeep
 async function deploy() {
@@ -22,7 +24,7 @@ async function deploy() {
   const renderer = await ethers.deployContract("CardRenderer", [owner.address, LINKS]);
   const cards = await ethers.deployContract("AgentCards", [
     owner.address, operator.address, treasury.address, signer.address, voucherSigner.address,
-    await registry.getAddress(), await renderer.getAddress(), HOLO,
+    await registry.getAddress(), await renderer.getAddress(),
   ]);
   await registry.register(agent.address, LABEL);
   return { owner, operator, agent, other, treasury, signer, voucherSigner, registry, renderer, cards };
@@ -277,28 +279,24 @@ describe("AgentCards", () => {
     expect((await cards.card(1)).level).to.equal(13n);
   });
 
-  it("forwards holo payments straight to the treasury", async () => {
-    const { agent, other, treasury, signer, cards } = await deploy();
+  it("sells neither Holo nor frames: nothing takes a payment for them, and only upkeep grants them", async () => {
+    const { owner, operator, agent, other, signer, cards } = await deploy();
     const [s, sig] = await stats(cards, signer, agent.address);
     await cards.connect(agent).mint(s, sig);
-    await expect(cards.connect(other).holo(1, { value: HOLO / 2n })).to.be.revertedWithCustomError(cards, "WrongPrice");
-    await expect(cards.connect(other).holo(1, { value: HOLO })).to.changeEtherBalances([other, treasury], [-HOLO, HOLO]);
-    expect(await ethers.provider.getBalance(await cards.getAddress())).to.equal(0n);
-    expect((await cards.card(1)).holo).to.equal(true);
-    expect(decode(await cards.tokenURI(1)).trait("Holo")).to.deep.equal(["Yes"]);
-    await expect(cards.connect(other).holo(1, { value: HOLO })).to.be.revertedWithCustomError(cards, "AlreadyHolo");
-  });
-
-  it("sells frames only to the card owner at the set price", async () => {
-    const { owner, agent, other, treasury, signer, cards } = await deploy();
-    const [s, sig] = await stats(cards, signer, agent.address);
-    await cards.connect(agent).mint(s, sig);
-    const price = ethers.parseEther("0.003");
-    await expect(cards.connect(agent).setFrame(1, 1, { value: price })).to.be.revertedWithCustomError(cards, "WrongPrice");
-    await cards.connect(owner).setFramePrice(1, price);
-    await expect(cards.connect(other).setFrame(1, 1, { value: price })).to.be.revertedWithCustomError(cards, "NotCardOwner");
-    await expect(cards.connect(agent).setFrame(1, 1, { value: price })).to.changeEtherBalance(treasury, price);
-    expect(decode(await cards.tokenURI(1)).trait("Frame")).to.deep.equal(["Gold"]);
+    const fns = cards.interface.fragments.filter((f) => f.type === "function").map((f) => f.name);
+    for (const gone of ["holo", "holoPrice", "setHoloPrice", "setFrame", "framePrice", "setFramePrice"]) expect(fns).to.not.include(gone);
+    // the calldata of the old sales, sent with BNB, finds no function to run
+    const old = new ethers.Interface(["function holo(uint256 id) payable", "function setFrame(uint256 id, uint16 frame) payable"]);
+    const to = await cards.getAddress();
+    await expect(other.sendTransaction({ to, data: old.encodeFunctionData("holo", [1]), value: ethers.parseEther("0.01") })).to.be.reverted;
+    await expect(agent.sendTransaction({ to, data: old.encodeFunctionData("setFrame", [1, 1]), value: ethers.parseEther("0.003") })).to.be.reverted;
+    expect([(await cards.card(1)).holo, (await cards.card(1)).frame]).to.deep.equal([false, 0n]);
+    // both come for free, from the operator's upkeep (or the owner)
+    await expect(cards.connect(operator).grantHolo([1])).to.emit(cards, "HoloApplied").withArgs(1, operator.address);
+    await expect(cards.connect(owner).grantFrame([1], 1)).to.emit(cards, "FrameApplied").withArgs(1, 1);
+    const { trait } = decode(await cards.tokenURI(1));
+    expect([trait("Holo"), trait("Frame")]).to.deep.equal([["Yes"], ["Gold"]]);
+    expect(await ethers.provider.getBalance(to)).to.equal(0n);
   });
 
   it("lets the owner or the operator grant free holo for promotions", async () => {
@@ -358,12 +356,14 @@ describe("AgentCards", () => {
   });
 
   it("reverts the whole payment when the treasury refuses it", async () => {
-    const { owner, agent, other, signer, cards } = await deploy();
+    const { owner, agent, signer, cards } = await deploy();
+    const pass = ethers.parseEther("0.02");
+    await cards.connect(owner).setPassPrice(pass); // a launch price, set before the first card
     const [s, sig] = await stats(cards, signer, agent.address);
     await cards.connect(agent).mint(s, sig);
     const bad = await ethers.deployContract("RejectingTreasury");
     await setLater(cards, owner, Setting.Treasury, await bad.getAddress());
-    await expect(cards.connect(agent).holo(1, { value: HOLO })).to.be.revertedWithCustomError(cards, "PaymentFailed");
+    await expect(cards.connect(agent).buyPass(1, { value: pass })).to.be.revertedWithCustomError(cards, "PaymentFailed");
   });
 
   it("holds every money or key setting 48 hours between proposal and use, and lets the owner cancel", async () => {
@@ -372,11 +372,11 @@ describe("AgentCards", () => {
     await expect(cards.connect(other).propose(Setting.Treasury, thief)).to.be.revertedWithCustomError(cards, "OwnableUnauthorizedAccount");
     const tx = cards.connect(owner).propose(Setting.Treasury, thief);
     await expect(tx).to.emit(cards, "SettingProposed");
-    expect((await cards.pending(Setting.Treasury)).value).to.equal(BigInt(thief));
+    expect((await cards.pending(Setting.Treasury, 0)).value).to.equal(BigInt(thief));
     await expect(cards.connect(owner).execute(Setting.Treasury)).to.be.revertedWithCustomError(cards, "NotReady");
     await time.increase(TIMELOCK - 60);
     await expect(cards.connect(owner).execute(Setting.Treasury)).to.be.revertedWithCustomError(cards, "NotReady");
-    await expect(cards.connect(owner).cancel(Setting.Treasury)).to.emit(cards, "SettingCancelled").withArgs(Setting.Treasury);
+    await expect(cards.connect(owner).cancel(Setting.Treasury)).to.emit(cards, "SettingCancelled").withArgs(Setting.Treasury, 0);
     await time.increase(120);
     await expect(cards.connect(owner).execute(Setting.Treasury)).to.be.revertedWithCustomError(cards, "NotReady");
     expect(await cards.treasury()).to.equal(treasury.address);
@@ -435,11 +435,11 @@ describe("AgentCards", () => {
     const op = cards.connect(operator);
     const ownerOnly = [
       () => op.setMintOpen(true), () => op.setUpdatesOpen(true), // the operator can stop the mint and updates, never reopen them
-      () => op.setHoloPrice(1), () => op.setFightPackPrice(1), () => op.setPassPrice(1), () => op.setOpenRegions(1),
-      () => op.setFramePrice(1, 1), () => op.addMythic(DESIGN), () => op.addMythics([DESIGN]),
-      () => op.setMythicSale(1, 1, true), () => op.propose(Setting.Treasury, operator.address),
-      () => op.cancel(Setting.Treasury), () => op.execute(Setting.Treasury), () => op.revokeOperator(),
-      () => op.transferOwnership(operator.address),
+      () => op.setFightPackPrice(1), () => op.setPassPrice(1), () => op.setOpenRegions(1),
+      () => op.addMythic(DESIGN), () => op.addMythics([DESIGN]), () => op.setMythicSale(1, 1, true),
+      () => op.propose(Setting.Treasury, operator.address), () => op.propose(Setting.FightPackPrice, 1), () => op.proposeMythicPrice(1, 1),
+      () => op.cancel(Setting.Treasury), () => op.cancelMythicPrice(1), () => op.execute(Setting.Treasury), () => op.executeMythicPrice(1),
+      () => op.revokeOperator(), () => op.transferOwnership(operator.address),
     ];
     for (const call of ownerOnly) await expect(call()).to.be.revertedWithCustomError(cards, "OwnableUnauthorizedAccount");
     await cards.connect(owner).setMintOpen(true);
@@ -453,10 +453,10 @@ describe("AgentCards", () => {
     await expect(cards.connect(owner).execute(Setting.Operator)).to.be.revertedWithCustomError(cards, "NotReady");
     // revoking is immediate and drops the pending proposal too
     await expect(cards.connect(owner).revokeOperator())
-      .to.emit(cards, "SettingCancelled").withArgs(Setting.Operator)
-      .and.to.emit(cards, "SettingChanged").withArgs(Setting.Operator, 0);
+      .to.emit(cards, "SettingCancelled").withArgs(Setting.Operator, 0)
+      .and.to.emit(cards, "SettingChanged").withArgs(Setting.Operator, 0, 0);
     expect(await cards.operator()).to.equal(ethers.ZeroAddress);
-    expect((await cards.pending(Setting.Operator)).eta).to.equal(0n);
+    expect((await cards.pending(Setting.Operator, 0)).eta).to.equal(0n);
     await expect(cards.connect(operator).pauseMint()).to.be.revertedWithCustomError(cards, "NotOperator");
     await time.increase(TIMELOCK);
     await expect(cards.connect(owner).execute(Setting.Operator)).to.be.revertedWithCustomError(cards, "NotReady");
@@ -478,26 +478,31 @@ describe("AgentCards", () => {
 
   it("drops every pending proposal when ownership changes hands, and lists them all", async () => {
     const { owner, operator, other, cards } = await deploy();
+    await cards.connect(owner).addMythic(DESIGN);
     await cards.connect(owner).propose(Setting.Treasury, other.address);
     await cards.connect(owner).propose(Setting.Signer, other.address);
     await cards.connect(owner).propose(Setting.MarketFee, 500);
     await cards.connect(owner).propose(Setting.Operator, other.address);
-    let all = await cards.allPending();
-    expect(all.length).to.equal(6);
-    expect(all.map((p) => p.eta > 0n)).to.deep.equal([true, true, false, false, true, true]);
-    expect(all[Setting.MarketFee].value).to.equal(500n);
+    await cards.connect(owner).propose(Setting.FightPackPrice, 9);
+    await cards.connect(owner).proposeMythicPrice(1, 11);
+    let [settings, mythicPrices] = await cards.allPending();
+    expect([settings.length, mythicPrices.length]).to.deep.equal([8, 1]); // every setting but MythicPrice, then each design's price
+    expect(settings.map((p) => p.eta > 0n)).to.deep.equal([true, true, false, false, true, true, true, false]);
+    expect([settings[Setting.MarketFee].value, settings[Setting.FightPackPrice].value, mythicPrices[0].value]).to.deep.equal([500n, 9n, 11n]);
 
     await cards.connect(owner).transferOwnership(other.address);
-    expect((await cards.allPending())[Setting.Treasury].eta).to.not.equal(0n); // still queued until the handover
+    expect((await cards.allPending())[0][Setting.Treasury].eta).to.not.equal(0n); // still queued until the handover
     await time.increase(TIMELOCK); // the handover itself waits 48 hours
     const accept = cards.connect(other).acceptOwnership();
-    for (const s of [Setting.Treasury, Setting.Signer, Setting.MarketFee, Setting.Operator]) {
-      await expect(accept).to.emit(cards, "SettingCancelled").withArgs(s);
+    for (const s of [Setting.Treasury, Setting.Signer, Setting.MarketFee, Setting.Operator, Setting.FightPackPrice]) {
+      await expect(accept).to.emit(cards, "SettingCancelled").withArgs(s, 0);
     }
-    all = await cards.allPending();
-    expect(all.every((p) => p.eta === 0n && p.value === 0n)).to.equal(true);
+    await expect(accept).to.emit(cards, "SettingCancelled").withArgs(Setting.MythicPrice, 1);
+    [settings, mythicPrices] = await cards.allPending();
+    expect([...settings, ...mythicPrices].every((p) => p.eta === 0n && p.value === 0n)).to.equal(true);
     await time.increase(TIMELOCK);
     await expect(cards.connect(other).execute(Setting.Treasury)).to.be.revertedWithCustomError(cards, "NotReady");
+    await expect(cards.connect(other).executeMythicPrice(1)).to.be.revertedWithCustomError(cards, "NotReady");
     // the old owner is out; the operator stays (the new owner can revoke it at once)
     await expect(cards.connect(owner).setMintOpen(false)).to.be.revertedWithCustomError(cards, "OwnableUnauthorizedAccount");
     expect(await cards.operator()).to.equal(operator.address);
@@ -531,11 +536,10 @@ describe("AgentCards", () => {
     const key = (s) => ethers.encodeBytes32String(s);
     await expect(cards.connect(owner).setMintOpen(false)).to.emit(cards, "ConfigSet").withArgs(key("mintOpen"), 0, 0);
     await expect(cards.connect(owner).setUpdatesOpen(false)).to.emit(cards, "ConfigSet").withArgs(key("updatesOpen"), 0, 0);
-    await expect(cards.connect(owner).setHoloPrice(0)).to.emit(cards, "ConfigSet").withArgs(key("holoPrice"), 0, 0);
+    // the launch prices, before the first card (later ones log SettingProposed and SettingChanged)
     await expect(cards.connect(owner).setFightPackPrice(5)).to.emit(cards, "ConfigSet").withArgs(key("fightPackPrice"), 5, 0);
     await expect(cards.connect(owner).setPassPrice(7)).to.emit(cards, "ConfigSet").withArgs(key("passPrice"), 7, 0);
     await expect(cards.connect(owner).setOpenRegions(3)).to.emit(cards, "ConfigSet").withArgs(key("openRegions"), 3, 0);
-    await expect(cards.connect(owner).setFramePrice(2, 9)).to.emit(cards, "ConfigSet").withArgs(key("framePrice"), 2, 9);
   });
 
   it("caps signed stats at what a minted card can reach (226 in total)", async () => {
@@ -574,7 +578,8 @@ describe("AgentCards", () => {
     const pack = ethers.parseEther("0.003");
     await expect(cards.connect(other).buyFights(1, 1, { value: pack })).to.be.revertedWithCustomError(cards, "WrongPrice"); // not for sale yet
     await expect(cards.connect(other).setFightPackPrice(pack)).to.be.revertedWithCustomError(cards, "OwnableUnauthorizedAccount");
-    await cards.connect(owner).setFightPackPrice(pack);
+    await expect(cards.connect(other).propose(Setting.FightPackPrice, pack)).to.be.revertedWithCustomError(cards, "OwnableUnauthorizedAccount");
+    await setLater(cards, owner, Setting.FightPackPrice, pack); // a card exists, so the price waits 48 hours
     const bought = cards.connect(other).buyFights(1, 3, { value: pack * 3n });
     await expect(bought).to.emit(cards, "FightsBought").withArgs(1, other.address, 3);
     await expect(bought).to.changeEtherBalances([other, treasury], [-pack * 3n, pack * 3n]);
@@ -592,7 +597,7 @@ describe("AgentCards", () => {
     await expect(cards.connect(other).buyPass(1, { value: 0 })).to.be.revertedWithCustomError(cards, "WrongPrice"); // not for sale yet
     await expect(cards.connect(other).buyPass(1, { value: pass })).to.be.revertedWithCustomError(cards, "WrongPrice");
     await expect(cards.connect(other).setPassPrice(pass)).to.be.revertedWithCustomError(cards, "OwnableUnauthorizedAccount");
-    await cards.connect(owner).setPassPrice(pass);
+    await setLater(cards, owner, Setting.PassPrice, pass);
     expect(await cards.passPrice()).to.equal(pass);
     const bought = cards.connect(other).buyPass(1, { value: pass });
     await expect(bought).to.emit(cards, "PassBought").withArgs(1, other.address, pass);
@@ -605,16 +610,91 @@ describe("AgentCards", () => {
     expect(await ethers.provider.getBalance(await cards.getAddress())).to.equal(0n);
   });
 
-  it("sells no holo once its price is 0, though the owner can still grant it", async () => {
+  it("applies the owner's launch prices at once while no card exists, and a Mythic copy counts as a card", async () => {
+    const { owner, other, cards } = await deploy();
+    const [pack, pass, mythic] = [ethers.parseEther("0.004"), ethers.parseEther("0.02"), DESIGN.price * 2n];
+    // the launch settings dev-fork.js (and the owner on mint day) signs right after deploy: no wait yet
+    await cards.connect(owner).setFightPackPrice(pack);
+    await cards.connect(owner).setPassPrice(pass);
+    await cards.connect(owner).addMythics([{ ...DESIGN, open: false }]);
+    await expect(cards.connect(owner).setMythicSale(1, mythic, true)).to.emit(cards, "MythicSaleSet").withArgs(1, mythic, true);
+    expect([await cards.fightPackPrice(), await cards.passPrice(), (await cards.mythics(1)).price]).to.deep.equal([pack, pass, mythic]);
+    // a Mythic copy is a card too, though totalSupply counts Agent ID cards only: from it on, prices wait
+    await cards.connect(other).buyMythic(1, { value: mythic });
+    expect([await cards.totalSupply(), await cards.totalCards()]).to.deep.equal([0n, 1n]);
+    await expect(cards.connect(owner).setFightPackPrice(pack / 2n)).to.be.revertedWithCustomError(cards, "Timelocked");
+    await expect(cards.connect(owner).setPassPrice(pass * 2n)).to.be.revertedWithCustomError(cards, "Timelocked");
+    await expect(cards.connect(owner).setMythicSale(1, DESIGN.price, true)).to.be.revertedWithCustomError(cards, "Timelocked");
+    // opening or closing a sale stays immediate: the same price, the sale closed
+    await expect(cards.connect(owner).setMythicSale(1, mythic, false)).to.emit(cards, "MythicSaleSet").withArgs(1, mythic, false);
+    await expect(cards.connect(other).buyMythic(1, { value: mythic })).to.be.revertedWithCustomError(cards, "SaleClosed");
+  });
+
+  it("holds every price change 48 hours once a card exists, a lower price or none too, and lets the owner cancel", async () => {
     const { owner, agent, other, signer, cards } = await deploy();
+    const [pack, pass] = [ethers.parseEther("0.004"), ethers.parseEther("0.02")];
+    await cards.connect(owner).setFightPackPrice(pack);
+    await cards.connect(owner).setPassPrice(pass);
     const [s, sig] = await stats(cards, signer, agent.address);
     await cards.connect(agent).mint(s, sig);
-    await cards.connect(owner).setHoloPrice(0);
-    await expect(cards.connect(other).holo(1, { value: 0 })).to.be.revertedWithCustomError(cards, "WrongPrice");
-    await expect(cards.connect(other).holo(1, { value: HOLO })).to.be.revertedWithCustomError(cards, "WrongPrice");
-    expect((await cards.card(1)).holo).to.equal(false);
-    await cards.connect(owner).grantHolo([1]);
-    expect((await cards.card(1)).holo).to.equal(true);
+    await expect(cards.connect(owner).setFightPackPrice(pack * 2n)).to.be.revertedWithCustomError(cards, "Timelocked");
+    // a higher price is proposed in the open and applies 48 hours later, not a second sooner
+    await expect(cards.connect(owner).propose(Setting.FightPackPrice, pack * 2n))
+      .to.emit(cards, "SettingProposed").withArgs(Setting.FightPackPrice, 0, pack * 2n, anyValue);
+    expect((await cards.pending(Setting.FightPackPrice, 0)).eta).to.equal(BigInt((await time.latest()) + TIMELOCK));
+    await expect(cards.connect(owner).execute(Setting.FightPackPrice)).to.be.revertedWithCustomError(cards, "NotReady");
+    await time.increase(TIMELOCK - 60);
+    await expect(cards.connect(owner).execute(Setting.FightPackPrice)).to.be.revertedWithCustomError(cards, "NotReady");
+    await expect(cards.connect(other).buyFights(1, 1, { value: pack })).to.emit(cards, "FightsBought"); // the old price holds meanwhile
+    await time.increase(60);
+    await expect(cards.connect(owner).execute(Setting.FightPackPrice))
+      .to.emit(cards, "SettingChanged").withArgs(Setting.FightPackPrice, 0, pack * 2n);
+    expect(await cards.fightPackPrice()).to.equal(pack * 2n);
+    // a lower price waits just the same, and a cancelled one never applies
+    await cards.connect(owner).propose(Setting.PassPrice, pass / 2n);
+    await expect(cards.connect(owner).execute(Setting.PassPrice)).to.be.revertedWithCustomError(cards, "NotReady");
+    await expect(cards.connect(owner).cancel(Setting.PassPrice)).to.emit(cards, "SettingCancelled").withArgs(Setting.PassPrice, 0);
+    await time.increase(TIMELOCK);
+    await expect(cards.connect(owner).execute(Setting.PassPrice)).to.be.revertedWithCustomError(cards, "NotReady");
+    expect(await cards.passPrice()).to.equal(pass);
+    // so does taking fight packs off sale (price 0)
+    await setLater(cards, owner, Setting.FightPackPrice, 0);
+    await expect(cards.connect(other).buyFights(1, 1, { value: 0 })).to.be.revertedWithCustomError(cards, "WrongPrice");
+  });
+
+  it("proposes a Mythic design's price with its design, shows it in allPending and applies it 48 hours later", async () => {
+    const { owner, agent, other, signer, cards } = await deploy();
+    await cards.connect(owner).addMythics([DESIGN, { ...DESIGN, name: "Dawnforged Seraph", region: 0, role: 1 }]);
+    const [s, sig] = await stats(cards, signer, agent.address);
+    await cards.connect(agent).mint(s, sig);
+    const next = ethers.parseEther("0.08");
+    await expect(cards.connect(owner).setMythicSale(2, next, true)).to.be.revertedWithCustomError(cards, "Timelocked");
+    await expect(cards.connect(owner).propose(Setting.MythicPrice, next)).to.be.revertedWithCustomError(cards, "BadSetting"); // it needs the design
+    await expect(cards.connect(owner).proposeMythicPrice(3, next)).to.be.revertedWithCustomError(cards, "NoSuchDesign");
+    await expect(cards.connect(owner).proposeMythicPrice(2, next)).to.emit(cards, "SettingProposed").withArgs(Setting.MythicPrice, 2, next, anyValue);
+    await cards.connect(owner).propose(Setting.PassPrice, 7);
+    // watchers see every pending change in one call, a design's price under its design
+    const [settings, mythicPrices] = await cards.allPending();
+    expect(settings.map((p) => p.value)).to.deep.equal([0n, 0n, 0n, 0n, 0n, 0n, 0n, 7n]);
+    expect(mythicPrices.map((p) => p.value)).to.deep.equal([0n, next]);
+    expect(mythicPrices[1].eta).to.equal((await cards.pending(Setting.MythicPrice, 2)).eta);
+    // the old price holds for the 48 hours
+    await expect(cards.connect(owner).executeMythicPrice(2)).to.be.revertedWithCustomError(cards, "NotReady");
+    await expect(cards.connect(other).buyMythic(2, { value: DESIGN.price })).to.emit(cards, "MythicMinted");
+    await time.increase(TIMELOCK);
+    await expect(cards.connect(owner).executeMythicPrice(1)).to.be.revertedWithCustomError(cards, "NotReady"); // nothing pending for it
+    await expect(cards.connect(owner).executeMythicPrice(2)).to.emit(cards, "SettingChanged").withArgs(Setting.MythicPrice, 2, next);
+    const m = await cards.mythics(2);
+    expect([m.price, m.open]).to.deep.equal([next, true]); // the sale stays as it was
+    await expect(cards.connect(other).buyMythic(2, { value: DESIGN.price })).to.be.revertedWithCustomError(cards, "WrongPrice");
+    await expect(cards.connect(other).buyMythic(2, { value: next })).to.emit(cards, "MythicMinted");
+    expect((await cards.allPending())[1][1].eta).to.equal(0n);
+    // a cancelled design price never applies
+    await cards.connect(owner).proposeMythicPrice(1, 1);
+    await expect(cards.connect(owner).cancelMythicPrice(1)).to.emit(cards, "SettingCancelled").withArgs(Setting.MythicPrice, 1);
+    await time.increase(TIMELOCK);
+    await expect(cards.connect(owner).executeMythicPrice(1)).to.be.revertedWithCustomError(cards, "NotReady");
+    expect((await cards.mythics(1)).price).to.equal(DESIGN.price);
   });
 
   it("sells a listed card on the built-in market: the seller is paid, the fee and royalty go to the treasury", async () => {

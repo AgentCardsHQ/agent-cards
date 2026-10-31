@@ -16,17 +16,21 @@ import {Card, Edition, ICardRenderer} from "./CardTypes.sol";
 /// starting stats, the role the agent picked and a secret roll fixed per Agent ID; the roll and how early the
 /// card is minted decide its rarity. The card is a game character: its level lives on the token, only goes up
 /// and moves with it when sold. Art and metadata come from a swappable renderer.
-/// Paid extras (packs of extra arena fights, the season pass) have fixed prices and no randomness; Holo is earned,
-/// not sold, while its price stays 0. Cards can also be sold on the built-in market, which takes a fee and pays the
-/// royalty on every sale it makes (other marketplaces decide for themselves whether to honour ERC-2981). Every
-/// payment is forwarded in the same transaction, so this contract never holds funds.
+/// Paid extras (packs of extra arena fights, the season pass) have fixed prices and no randomness. Holo and frames
+/// are never sold: no function here takes a payment for them, they are only granted for free as upkeep (Holo is
+/// earned: season prizes, the wheel, early pre-registrations). Cards can also be sold on the built-in market, which
+/// takes a fee and pays the royalty on every sale it makes (other marketplaces decide for themselves whether to
+/// honour ERC-2981). Every payment is forwarded in the same transaction, so this contract never holds funds.
 /// Mythic cards are limited, numbered series on top of that: anyone can buy the next copy of a design at its
 /// fixed price, and a small reserve per design goes to free wheel prizes through the server's vouchers.
 /// Settings that move money or keys (treasury, both signers, renderer, market fee, operator) wait 48 hours between
 /// proposal and use, and ownership moves in two steps with the same wait, so a tricked or stolen owner key can't
-/// redirect anything unnoticed. The owner is a human-held wallet; day-to-day upkeep (holo airdrops, wheel prizes, shrinking a Mythic
-/// reserve, pausing the mint or level updates) goes through a separate operator, the AI agent's wallet, which can't
-/// touch money, prices, keys or ownership. The owner can revoke the operator at once.
+/// redirect anything unnoticed. Prices wait the same 48 hours once cards exist: the owner's launch prices (a fight
+/// pack, the season pass, each Mythic design) apply at once only while no card exists, and from the first card on
+/// every price change, up, down or off sale, is proposed in the open first (SettingProposed, allPending). The owner
+/// is a human-held wallet; day-to-day upkeep (holo airdrops, wheel prizes, shrinking a Mythic reserve, pausing the
+/// mint or level updates) goes through a separate operator, the AI agent's wallet, which can't touch money, prices,
+/// keys or ownership. The owner can revoke the operator at once.
 contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTransient {
     bytes32 private constant STATS_TYPEHASH = keccak256(
         "Stats(address wallet,string label,uint8 power,uint8 defense,uint8 speed,uint8 luck,uint8 role,uint8 region,uint32 badges,uint32 roll,uint64 issuedAt,uint64 expiry)"
@@ -58,14 +62,20 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     uint256 public constant TIMELOCK = 48 hours;
     uint256 private constant MAX_UPDATE_AHEAD = 1 hours; // how far a level update's issuedAt may run ahead of the chain
 
-    /// Settings that wait TIMELOCK between propose() and execute(); addresses are passed as uint256.
+    /// Settings that wait TIMELOCK between propose() and execute(): addresses as uint256, the market fee in bps and
+    /// prices in wei (0 = not for sale). Prices wait only once a card exists (see setFightPackPrice), and a lower price
+    /// waits like a higher one. MythicPrice is one design's price, so its proposals carry the design's id
+    /// (proposeMythicPrice, cancelMythicPrice, executeMythicPrice).
     enum Setting {
         Treasury,
         Signer,
         VoucherSigner,
         Renderer,
         MarketFee,
-        Operator
+        Operator,
+        FightPackPrice,
+        PassPrice,
+        MythicPrice
     }
 
     struct Pending {
@@ -134,7 +144,6 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     bool public mintOpen = true;
     bool public updatesOpen = true; // signed level updates; the operator can pause them at once (a leaked signer)
     uint16 public openRegions = 15; // bit per region (1 West, 2 East, 4 North, 8 South); all four open from Season 0
-    uint256 public holoPrice;
     uint256 public fightPackPrice; // one pack of extra arena fights; 0 = not for sale
     uint256 public passPrice; // a season pass of extra daily arena fights for one card; 0 = not for sale
     uint16 public marketFeeBps = 250; // 2.5% of every sale on the built-in market, on top of the 5% royalty
@@ -145,18 +154,18 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
 
     mapping(uint256 => Card) private _cards;
     mapping(uint256 => uint256) public cardOfAgentId; // Agent ID token id -> card id (ids start at 1)
-    mapping(uint16 => uint256) public framePrice; // 0 = not for sale
     mapping(uint256 => uint256) public priceOf; // built-in market: asking price; 0 = not for sale
     mapping(uint256 => Mythic) public mythics;
     mapping(uint256 => bool) public claimUsed; // MythicClaim nonce -> spent
-    mapping(Setting => Pending) public pending; // timelocked settings waiting for execute()
+    // timelocked changes waiting for execute(), by setting and design: the Mythic design for MythicPrice, else 0
+    mapping(Setting => mapping(uint256 => Pending)) public pending;
     uint64 public ownerEta; // when a started ownership transfer may be accepted; 0 = none started
 
     event CardMinted(
         uint256 indexed id, address indexed agent, uint256 indexed agentId, string name, uint8 rarity, bool awakened
     );
     event CardUpdated(uint256 indexed id, uint16 level);
-    event HoloApplied(uint256 indexed id, address indexed payer);
+    event HoloApplied(uint256 indexed id, address indexed by);
     event FrameApplied(uint256 indexed id, uint16 frame);
     event FightsBought(uint256 indexed id, address indexed payer, uint16 packs);
     event PassBought(uint256 indexed id, address indexed payer, uint256 price);
@@ -166,11 +175,13 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     event MythicMinted(uint256 indexed id, uint256 indexed design, address indexed to, uint16 number, bool wheel);
     event MythicSaleSet(uint256 indexed design, uint256 price, bool open);
     event MythicCapped(uint256 indexed design, uint16 saleSupply, uint16 wheelReserve);
-    event SettingProposed(Setting indexed setting, uint256 value, uint64 eta);
-    event SettingCancelled(Setting indexed setting);
+    /// A timelocked change, proposed, cancelled or applied; `design` is the Mythic design for MythicPrice, else 0.
+    event SettingProposed(Setting indexed setting, uint256 indexed design, uint256 value, uint64 eta);
+    event SettingCancelled(Setting indexed setting, uint256 indexed design);
     event OwnershipProposed(address indexed newOwner, uint64 eta);
-    event SettingChanged(Setting indexed setting, uint256 value);
-    /// Every other owner setting, applied at once: key names it ("mintOpen", "holoPrice", "framePrice", ...).
+    event SettingChanged(Setting indexed setting, uint256 indexed design, uint256 value);
+    /// Every other owner setting, applied at once: key names it ("mintOpen", "openRegions", the launch prices
+    /// "fightPackPrice" and "passPrice", ...).
     event ConfigSet(bytes32 indexed key, uint256 a, uint256 b);
 
     error NotAgent();
@@ -184,7 +195,6 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     error NotCardOwner();
     error StaleUpdate();
     error WrongPrice();
-    error AlreadyHolo();
     error PaymentFailed();
     error RegionClosed();
     error OwnCard();
@@ -197,6 +207,7 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     error BadFrame();
     error FutureUpdate();
     error NotReady();
+    error Timelocked();
     error BadSetting();
     error RenounceDisabled();
     error NotOperator();
@@ -215,8 +226,7 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
         address signer_,
         address voucherSigner_,
         IERC721 registry_,
-        ICardRenderer renderer_,
-        uint256 holoPrice_
+        ICardRenderer renderer_
     ) ERC721("Agent Cards", "ACARD") Ownable(owner_) EIP712("AgentCards", "1") {
         // owner is passed in because the contract is deployed through a CREATE2 factory
         operator = operator_;
@@ -225,7 +235,6 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
         voucherSigner = voucherSigner_;
         agentRegistry = registry_;
         renderer = renderer_;
-        holoPrice = holoPrice_;
         _setDefaultRoyalty(treasury_, ROYALTY_BPS);
     }
 
@@ -282,24 +291,6 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
         c.badges = u.badges;
         c.updatedAt = u.issuedAt;
         emit CardUpdated(u.id, u.level);
-    }
-
-    /// Holo is earned (season prizes, the wheel, early pre-registrations) and ships with price 0, so this reverts;
-    /// if the owner ever sets a price, anyone may pay it to make a card holo (gifts included).
-    function holo(uint256 id) external payable nonReentrant {
-        _requireOwned(id);
-        if (msg.value != holoPrice || holoPrice == 0) revert WrongPrice();
-        _makeHolo(id, msg.sender);
-        _pay();
-    }
-
-    function setFrame(uint256 id, uint16 frame) external payable nonReentrant {
-        if (ownerOf(id) != msg.sender) revert NotCardOwner();
-        uint256 price = framePrice[frame];
-        if (price == 0 || msg.value != price) revert WrongPrice();
-        _cards[id].frame = frame;
-        _pay();
-        emit FrameApplied(id, frame);
     }
 
     /// Packs of extra arena fights for a card; anyone may buy them (gifts included). The game server credits them
@@ -389,7 +380,7 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     }
 
     /// Every card in existence: Agent ID cards (totalSupply) plus all Mythic copies sold or awarded.
-    function totalCards() external view returns (uint256 n) {
+    function totalCards() public view returns (uint256 n) {
         n = totalSupply;
         for (uint256 d = 1; d <= mythicDesigns; ++d) {
             n += uint256(mythics[d].sold) + mythics[d].awarded;
@@ -465,29 +456,37 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     // ------------------------------------------------------------------ owner
 
     /// Starts the 48-hour wait for a new treasury, signer, voucher signer, renderer or operator (addresses as
-    /// uint256) or market fee (bps). A new proposal for the same setting replaces the old one and restarts the wait.
+    /// uint256), market fee (bps), or fight pack or season pass price (wei, 0 = not for sale). A new proposal for the
+    /// same setting replaces the old one and restarts the wait (a Mythic design's price: proposeMythicPrice).
     function propose(Setting setting, uint256 value) external onlyOwner {
         if (setting == Setting.MarketFee) {
             if (value > MAX_MARKET_FEE_BPS) revert FeeTooHigh();
-        } else if (value == 0 || value > type(uint160).max) {
-            revert BadSetting();
+        } else if (setting == Setting.MythicPrice) {
+            revert BadSetting(); // it needs the design: proposeMythicPrice
+        } else if (setting < Setting.FightPackPrice && (value == 0 || value > type(uint160).max)) {
+            revert BadSetting(); // the address settings
         }
-        uint64 eta = uint64(block.timestamp + TIMELOCK);
-        pending[setting] = Pending(value, eta);
-        emit SettingProposed(setting, value, eta);
+        _propose(setting, 0, value);
+    }
+
+    /// Starts the 48-hour wait for a new price of Mythic `design` (wei, 0 = not for sale), replacing one pending.
+    function proposeMythicPrice(uint256 design, uint256 price) external onlyOwner {
+        _mythic(design);
+        _propose(Setting.MythicPrice, design, price);
     }
 
     function cancel(Setting setting) external onlyOwner {
-        delete pending[setting];
-        emit SettingCancelled(setting);
+        _drop(setting, 0);
     }
 
-    /// Applies a proposal once its 48 hours have passed.
+    function cancelMythicPrice(uint256 design) external onlyOwner {
+        _drop(Setting.MythicPrice, design);
+    }
+
+    /// Applies a proposal once its 48 hours have passed (a Mythic design's price: executeMythicPrice).
     function execute(Setting setting) external onlyOwner {
-        Pending memory p = pending[setting];
-        if (p.eta == 0 || block.timestamp < p.eta) revert NotReady();
-        delete pending[setting];
-        address a = address(uint160(p.value));
+        uint256 value = _take(setting, 0);
+        address a = address(uint160(value));
         if (setting == Setting.Treasury) {
             treasury = payable(a);
             _setDefaultRoyalty(a, ROYALTY_BPS);
@@ -499,25 +498,38 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
             renderer = ICardRenderer(a);
         } else if (setting == Setting.Operator) {
             operator = a;
-        } else {
-            marketFeeBps = uint16(p.value);
+        } else if (setting == Setting.MarketFee) {
+            marketFeeBps = uint16(value);
+        } else if (setting == Setting.FightPackPrice) {
+            fightPackPrice = value;
+        } else if (setting == Setting.PassPrice) {
+            passPrice = value;
         }
-        emit SettingChanged(setting, p.value);
+        emit SettingChanged(setting, 0, value);
+    }
+
+    /// Applies a proposed Mythic price once its 48 hours have passed; the sale stays open or closed as it was.
+    function executeMythicPrice(uint256 design) external onlyOwner {
+        uint256 price = _take(Setting.MythicPrice, design);
+        mythics[design].price = price;
+        emit SettingChanged(Setting.MythicPrice, design, price);
     }
 
     /// Removes the operator at once, no wait (say the agent wallet was tricked or its key leaked); a new operator
     /// takes the usual 48-hour proposal. A pending operator proposal goes too.
     function revokeOperator() external onlyOwner {
         operator = address(0);
-        _drop(Setting.Operator);
-        emit SettingChanged(Setting.Operator, 0);
+        _drop(Setting.Operator, 0);
+        emit SettingChanged(Setting.Operator, 0, 0);
     }
 
-    /// Every setting's pending proposal, in Setting order (eta 0 = none), for the site and ops tools to show.
-    function allPending() external view returns (Pending[] memory all) {
-        uint256 n = uint256(type(Setting).max) + 1;
-        all = new Pending[](n);
-        for (uint256 i; i < n; ++i) all[i] = pending[Setting(i)];
+    /// Every pending proposal, for the site and ops tools to show (eta 0 = none): `settings` for each setting but
+    /// MythicPrice, in Setting order, and `mythicPrices` for each Mythic design's price, design 1 first.
+    function allPending() external view returns (Pending[] memory settings, Pending[] memory mythicPrices) {
+        settings = new Pending[](uint256(Setting.MythicPrice));
+        for (uint256 i; i < settings.length; ++i) settings[i] = pending[Setting(i)][0];
+        mythicPrices = new Pending[](mythicDesigns);
+        for (uint256 d; d < mythicPrices.length; ++d) mythicPrices[d] = pending[Setting.MythicPrice][d + 1];
     }
 
     /// Ownership only moves with transferOwnership + acceptOwnership; it can never be given up by mistake.
@@ -543,14 +555,28 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     /// A new owner starts clean: proposals queued under the previous owner are dropped, never inherited.
     function _transferOwnership(address newOwner) internal override {
         super._transferOwnership(newOwner);
-        uint256 n = uint256(type(Setting).max) + 1;
-        for (uint256 i; i < n; ++i) _drop(Setting(i));
+        for (uint256 i; i < uint256(Setting.MythicPrice); ++i) _drop(Setting(i), 0);
+        for (uint256 d = 1; d <= mythicDesigns; ++d) _drop(Setting.MythicPrice, d);
     }
 
-    function _drop(Setting setting) private {
-        if (pending[setting].eta == 0) return;
-        delete pending[setting];
-        emit SettingCancelled(setting);
+    function _propose(Setting setting, uint256 design, uint256 value) private {
+        uint64 eta = uint64(block.timestamp + TIMELOCK);
+        pending[setting][design] = Pending(value, eta);
+        emit SettingProposed(setting, design, value, eta);
+    }
+
+    /// Takes a proposal off the queue once its 48 hours have passed, and returns its value.
+    function _take(Setting setting, uint256 design) private returns (uint256 value) {
+        Pending memory p = pending[setting][design];
+        if (p.eta == 0 || block.timestamp < p.eta) revert NotReady();
+        delete pending[setting][design];
+        value = p.value;
+    }
+
+    function _drop(Setting setting, uint256 design) private {
+        if (pending[setting][design].eta == 0) return;
+        delete pending[setting][design];
+        emit SettingCancelled(setting, design);
     }
 
     function setMintOpen(bool open) external onlyOwner {
@@ -564,17 +590,17 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
         emit ConfigSet("updatesOpen", open ? 1 : 0, 0);
     }
 
-    function setHoloPrice(uint256 price) external onlyOwner {
-        holoPrice = price;
-        emit ConfigSet("holoPrice", price, 0);
-    }
-
+    /// The fight pack's launch price (0 = not for sale), applied at once while no card exists. From the first card on
+    /// a price changes only through propose(Setting.FightPackPrice, price) and its 48-hour wait, lower or higher alike.
     function setFightPackPrice(uint256 price) external onlyOwner {
+        _beforeFirstCard();
         fightPackPrice = price;
         emit ConfigSet("fightPackPrice", price, 0);
     }
 
+    /// The season pass's launch price, on the same terms: later changes go through propose(Setting.PassPrice, price).
     function setPassPrice(uint256 price) external onlyOwner {
+        _beforeFirstCard();
         passPrice = price;
         emit ConfigSet("passPrice", price, 0);
     }
@@ -583,11 +609,6 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     function setOpenRegions(uint16 mask) external onlyOwner {
         openRegions = mask;
         emit ConfigSet("openRegions", mask, 0);
-    }
-
-    function setFramePrice(uint16 frame, uint256 price) external onlyOwner {
-        framePrice[frame] = price;
-        emit ConfigSet("framePrice", frame, price);
     }
 
     // ---- upkeep: the owner or the operator. None of it moves money or changes a price, key or ownership.
@@ -608,7 +629,10 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
     function grantHolo(uint256[] calldata ids) external onlyOperator {
         for (uint256 i; i < ids.length; ++i) {
             _requireOwned(ids[i]);
-            if (!_cards[ids[i]].holo) _makeHolo(ids[i], msg.sender);
+            Card storage c = _cards[ids[i]];
+            if (c.holo) continue;
+            c.holo = true;
+            emit HoloApplied(ids[i], msg.sender);
         }
     }
 
@@ -637,7 +661,8 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
 
     // ---- owner only again: Mythic designs and their sale.
 
-    /// Adds a Mythic design, open for sale or not. Every copy gets the design's name, realm, role and stats.
+    /// Adds a Mythic design at its price, open for sale or not. Every copy gets the design's name, realm, role and
+    /// stats. A design added once cards exist comes with its price too; changing it later waits like any price.
     function addMythic(Mythic calldata m) external onlyOwner returns (uint256 design) {
         design = _addMythic(m);
     }
@@ -658,9 +683,12 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
         emit MythicAdded(design, m.name, uint16(supply), m.price);
     }
 
-    /// A design's price and whether it is on sale (the wheel reserve doesn't depend on either).
+    /// Opens or closes a design's sale at once (the wheel reserve doesn't depend on it). Its price changes here only
+    /// while no card exists; from the first card on, pass the current price and propose a new one with
+    /// proposeMythicPrice, which waits 48 hours like every price.
     function setMythicSale(uint256 design, uint256 price, bool open) external onlyOwner {
         Mythic storage m = _mythic(design);
+        if (price != m.price) _beforeFirstCard();
         m.price = price;
         m.open = open;
         emit MythicSaleSet(design, price, open);
@@ -670,6 +698,13 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
 
     function _checkFresh(uint64 expiry) private view {
         if (block.timestamp > expiry) revert Expired();
+    }
+
+    /// Prices apply at once only while no card exists, neither an Agent ID card nor a Mythic copy: the owner's launch
+    /// settings. Cards are never burned, so from the first card on this always reverts and a price can only change
+    /// through a proposal that waits 48 hours.
+    function _beforeFirstCard() private view {
+        if (totalCards() != 0) revert Timelocked();
     }
 
     /// Each stat 1..99, and together no more than a minted card can reach (MAX_STAT_TOTAL).
@@ -748,13 +783,6 @@ contract AgentCards is ERC721, ERC2981, Ownable2Step, EIP712, ReentrancyGuardTra
         uint256 design = (id - MYTHIC_BASE) / 1_000;
         Mythic storage m = mythics[design];
         e = Edition(uint16(design), m.season, uint16(id % 1_000), m.saleSupply + m.wheelReserve);
-    }
-
-    function _makeHolo(uint256 id, address by) private {
-        Card storage c = _cards[id];
-        if (c.holo) revert AlreadyHolo();
-        c.holo = true;
-        emit HoloApplied(id, by);
     }
 
     /// A card that changes hands (sale, gift, market) comes off the market.

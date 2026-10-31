@@ -3,8 +3,8 @@ const { expect } = require("chai");
 const { ethers, network } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
-const HOLO = ethers.parseEther("0.01");
 const PRICE = ethers.parseEther("0.05");
+const TIMELOCK = 48 * 3600;
 const IMG = "https://cards.test/api/card/";
 const SITE = "https://cards.test/card/";
 const BASE = 1_000_000n; // AgentCards.MYTHIC_BASE
@@ -28,7 +28,7 @@ async function deploy() {
   const renderer = await ethers.deployContract("CardRenderer", [owner.address, LINKS]);
   const cards = await ethers.deployContract("AgentCards", [
     owner.address, operator.address, treasury.address, signer.address, vSigner.address,
-    await registry.getAddress(), await renderer.getAddress(), HOLO,
+    await registry.getAddress(), await renderer.getAddress(),
   ]);
   return { owner, operator, buyer, other, treasury, signer, vSigner, registry, renderer, cards };
 }
@@ -101,8 +101,13 @@ describe("Mythic cards", () => {
     await expect(cards.connect(other).buyMythic(1, { value: PRICE })).to.emit(cards, "MythicMinted").withArgs(mythicId(1, 2), 1, other.address, 2, false);
     expect(await cards.totalSupply()).to.equal(0n); // Agent ID card numbers are untouched
 
-    await cards.connect(owner).setMythicSale(1, 0, true); // price 0 = not for sale
+    // copies are out now, so a new price (0 = not for sale) is proposed and waits 48 hours
+    await expect(cards.connect(owner).setMythicSale(1, 0, true)).to.be.revertedWithCustomError(cards, "Timelocked");
+    await cards.connect(owner).proposeMythicPrice(1, 0);
+    await time.increase(TIMELOCK);
+    await cards.connect(owner).executeMythicPrice(1);
     await expect(cards.connect(buyer).buyMythic(1, { value: 0 })).to.be.revertedWithCustomError(cards, "WrongPrice");
+    await expect(cards.connect(buyer).buyMythic(1, { value: PRICE })).to.be.revertedWithCustomError(cards, "WrongPrice");
   });
 
   it("stops each series at its sale supply and its wheel reserve, separately", async () => {
@@ -190,10 +195,11 @@ describe("Mythic cards", () => {
   });
 
   it("plays like any card: holo, level updates and the built-in market", async () => {
-    const { owner, buyer, other, treasury, signer, cards } = await withSaint({ open: true });
+    const { owner, operator, buyer, other, treasury, signer, cards } = await withSaint({ open: true });
     await cards.connect(buyer).buyMythic(1, { value: PRICE });
     const id = mythicId(1, 1);
-    await expect(cards.connect(other).holo(id, { value: HOLO })).to.changeEtherBalance(treasury, HOLO);
+    await expect(cards.connect(operator).grantHolo([id])).to.emit(cards, "HoloApplied").withArgs(id, operator.address); // earned, never sold
+    expect((await cards.card(id)).holo).to.equal(true);
     const now = await time.latest();
     const u = { id, level: 5, badges: 0, issuedAt: now + 1, expiry: now + 600 };
     const types = {

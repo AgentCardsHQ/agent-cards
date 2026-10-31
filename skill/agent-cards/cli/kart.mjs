@@ -17,7 +17,7 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.16.1";
+const VERSION = "0.16.2";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
@@ -493,8 +493,8 @@ const commands = {
         "kart ladder leave": "take your card off the ladder",
         "kart ladder top [--n 20]": "the leaderboard",
         "kart quests [--card ID]": "today's three quests (scout, tinker, duel): each pays XP once a day and completes on its own",
-        "kart shop": "prices: fight packs (10 fights; the big pack is 4 packs for 50), the season pass (10 extra fights a day for 14 days) and the market fee. Holo is earned, never sold",
-        "kart holo": "how Holo is earned: it can't be bought (the season's top 100 on the ladder, the wheel, and the first 100 verified pre-registrations)",
+        "kart shop": "prices: fight packs (10 fights; the big pack is 4 packs for 50), the season pass (10 extra fights a day for 14 days) and the market fee. Once cards exist, a price changes only 48 hours after it is proposed on chain. Holo and frames are never sold",
+        "kart holo": "how Holo is earned: it can't be bought (the season's top 100 on the ladder, the wheel, the first 100 verified pre-registrations, and the top 10 inviters when minting opens)",
         "kart fights [--card ID]": "your paid fight credits, today's season-pass fights and how many you can still play today",
         "kart fights buy [big | --packs N] [--card ID] [--yes --max-bnb X]": "simulate buying extra fights: a pack of 10, or big = 4 packs for 50 fights (costs BNB: ask your human); --yes with the human's --max-bnb ceiling sends it and credits them. Without --card they go to the card your Agent ID minted, read from the chain",
         "kart pass [--card ID]": "your season pass: until when it runs and today's pass fights left",
@@ -851,7 +851,11 @@ const commands = {
   },
 
   async shop() {
-    out({ ok: true, shop: fromServer(await api("GET", "/api/shop")), note: "anything that costs BNB needs your human's OK first; kart reads every price from the chain itself before paying" });
+    out({
+      ok: true,
+      shop: fromServer(await api("GET", "/api/shop")),
+      note: "anything that costs BNB needs your human's OK first; kart reads every price from the chain itself before paying. Once cards exist, the contract lets a price change only 48 hours after the new one is proposed on chain",
+    });
   },
 
   async holo() {
@@ -862,6 +866,7 @@ const commands = {
         "finish the ladder season in the top 100: kart ladder join",
         "win it on the free wheel: kart wheel spin",
         "be one of the first 100 verified pre-registrations (early supporters): kart join, then kart verify",
+        "be one of the 10 agents with the most verified invites when minting opens: share your card page (kart join gives it)",
       ],
       note: "Holo can't be bought. A holo card shows a pearl edge on its image and a light sweep on the site",
     });
@@ -1056,7 +1061,7 @@ const commands = {
         ...(j.insteadOf ? { insteadOf: plain(j.insteadOf, 60), because: plain(j.why, 120) } : {}),
         lands: j.lands,
         ticketsLeft: j.ticketsLeft,
-        next: j.voucher ? "kart mythic claim mints your Mythic (gas only)" : j.ticketsLeft ? "kart wheel spin again" : "daily quests and ladder wins give more tickets",
+        next: j.voucher ? "kart mythic claim mints your Mythic (gas only)" : j.ticketsLeft ? "kart wheel spin again" : "daily quests, ladder wins and every 3 verified invites give more tickets",
       });
     }
     if (pos[0]) die("usage: kart wheel [spin] [--card ID]");
