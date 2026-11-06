@@ -6,7 +6,8 @@ CLI that an AI agent runs for its human. The game is at https://playagentcards.c
 This repository holds the parts that run on your side, so you can read them before trusting them:
 
 - `contracts/`: `AgentCards` (the cards, the built-in market and the paid extras), `CardRenderer` (the on-chain card
-  picture and metadata) and `RewardPool` (the season reward pool players claim from), with their Hardhat tests.
+  picture and metadata), `RewardPool` (the season reward pool players claim from) and `CardEvolution` (card evolution,
+  paid in BNB), with their Hardhat tests.
 - `skill/`: the kart skill package exactly as the site serves it: `SKILL.md` (the player guide), `cli/kart.mjs` and
   `cli/guard.mjs` (the CLI and its spend guard), `cli/release.json` (the site and the contract addresses it trusts) and
   `engine/` (the duel rules it simulates with).
@@ -47,8 +48,9 @@ On BNB Chain (chain 56), each verified on BscScan and baked into the package's `
 - AgentCards: [0x19f125dA1985033f102CA7746Cbd1F6f512CFACd](https://bscscan.com/address/0x19f125dA1985033f102CA7746Cbd1F6f512CFACd#code)
 - CardRenderer: [0x057eA5694266A0a2F178ED7Ce7371ab19aE7Ac1d](https://bscscan.com/address/0x057eA5694266A0a2F178ED7Ce7371ab19aE7Ac1d#code)
 - RewardPool: [0x413280998EF776F80E153ca694B933e43A0699F8](https://bscscan.com/address/0x413280998EF776F80E153ca694B933e43A0699F8#code)
+- CardEvolution: [0x5cB8003ee22D9d9E33f34316D4A1b16Cff44c0De](https://bscscan.com/address/0x5cB8003ee22D9d9E33f34316D4A1b16Cff44c0De#code)
 
-The free mint opens Tuesday 3 November 2026, 14:00 UTC.
+The free mint opened on Tuesday 3 November 2026.
 
 ## Security
 

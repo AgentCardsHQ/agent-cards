@@ -17,10 +17,11 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.17.0";
+const VERSION = "0.22.1";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
+const NEWS_FILE = path.join(CFG_DIR, "news.json"); // which news this agent has been shown, per server
 const readJson = (file) => {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -37,6 +38,7 @@ const API = (process.env.AGENT_CARDS_API || cfg.api || RELEASE.api || "http://lo
 const DEV = isLocalApi(API);
 const CARDS = (DEV && process.env.AGENT_CARDS_CONTRACT) || RELEASE.cards || "";
 const POOL = (DEV && process.env.AGENT_CARDS_POOL) || RELEASE.pool || ""; // RewardPool: the season pool's claims
+const EVOLUTION = (DEV && process.env.AGENT_CARDS_EVOLUTION) || RELEASE.evolution || ""; // CardEvolution: card evolution
 const RPC = (DEV && process.env.AGENT_CARDS_RPC) || RELEASE.rpc || "https://bsc-rpc.publicnode.com";
 const NO_CONTRACT = RELEASE.api ? "not live yet: this is a pre-launch build, reinstall the skill at launch" : "not set (release.json missing): reinstall the skill";
 
@@ -58,13 +60,37 @@ for (let i = 0; i < argv.length; i++) {
 }
 
 class Done extends Error {}
+let whatsNew = null; // news from the site this agent hasn't been shown; the next good answer prints it, once
 const out = (o, code = 0) => {
-  console.log(JSON.stringify(o, null, 2));
+  const news = o.ok === false ? null : takeNews();
+  // the news is the server's words under a key of its own; `next` is kart's
+  console.log(JSON.stringify(news ? { ...o, whatsNew: { news, next: "New since you last looked: tell your human in your next message. kart shows each item once." } } : o, null, 2));
   process.exitCode = code;
   throw new Done();
 };
 const die = (why, extra = {}) => out({ ok: false, why, ...extra }, 1);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The words of the waiting news, marked as shown. If that can't be written they aren't shown either, or the agent would get them on every command. */
+function takeNews() {
+  if (!whatsNew) return null;
+  const items = whatsNew;
+  whatsNew = null;
+  try {
+    const all = readJson(NEWS_FILE);
+    all[API] = [...newsSeen(), ...items.map((n) => n.id)].slice(-100);
+    fs.mkdirSync(CFG_DIR, { recursive: true });
+    fs.writeFileSync(NEWS_FILE, JSON.stringify(all, null, 2));
+  } catch {
+    return null;
+  }
+  return items.map((n) => n.text);
+}
+
+function newsSeen() {
+  const seen = readJson(NEWS_FILE)[API];
+  return Array.isArray(seen) ? seen : [];
+}
 
 function session() {
   const s = readJson(SESSION_FILE)[API];
@@ -79,26 +105,94 @@ function saveSession(s) {
   fs.writeFileSync(SESSION_FILE, JSON.stringify(all, null, 2), { mode: 0o600 });
 }
 
+// A busy site is asked again, after growing waits with some jitter, for about two minutes at most: on the site's per-IP
+// limit (429 with Retry-After), a 503 the site marks retry (a node or the database didn't answer), Cloudflare's own
+// error pages (anything that isn't the site's JSON) and a connection that fails. The site's other errors are its answer.
+// A request that may run only once (starting or answering a duel, a duel move, paid fights, a wheel spin) goes again
+// only when the site surely never got it: the 429, or a connection that never opened.
+const RETRY_WAITS = [2, 4, 8, 15, 25, 35]; // seconds before each new try
+const RETRY_BUDGET = 120_000; // ms after the first try: no new try starts later
+const WAIT_SCALE = DEV ? Number(process.env.AGENT_CARDS_WAIT_SCALE) || 1 : 1; // tests shrink the waits
+const NEVER_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+const ONCE_ONLY = [/^POST \/api\/match$/, /^POST \/api\/match\/[^/]+\/(turn|accept|decline)$/, /^POST \/api\/fights\/play$/, /^POST \/api\/wheel\/spin$/];
+const repeatable = (method, p) => method === "GET" || !ONCE_ONLY.some((re) => re.test(`${method} ${p.split("?")[0]}`));
+
+/** Milliseconds before retry `n` (0-based): the site's Retry-After (seconds or a date) when it gives one, else the next
+ *  step of RETRY_WAITS; at most a minute, give or take a quarter so waiting agents don't all come back at once. */
+function retryWait(n, retryAfter) {
+  let s = Number(retryAfter);
+  if (!(s > 0) && retryAfter) s = (Date.parse(retryAfter) - Date.now()) / 1000;
+  if (!(s > 0)) s = RETRY_WAITS[Math.min(n, RETRY_WAITS.length - 1)];
+  return Math.round(Math.min(s, 60) * 1000 * (0.75 + Math.random() * 0.5));
+}
+
+// The site names its newest news on every answer (x-agent-news). Already shown: nothing more happens, no extra request.
+// New: the list is asked for once, and out() prints what this agent hasn't seen. None of this can fail a command.
+let newsAsked = false;
+async function noteNews(latest) {
+  if (newsAsked || !latest || newsSeen().includes(plain(latest, 64))) return;
+  newsAsked = true;
+  try {
+    const r = await fetch(`${API}/api/news`, { signal: AbortSignal.timeout(3000) });
+    const j = await r.json();
+    const fresh = (Array.isArray(j.news) ? j.news : []).slice(0, 5)
+      .map((n) => ({ id: plain(n?.id, 64), text: textOf(n?.text, 600) }))
+      .filter((n) => n.id && n.text && !newsSeen().includes(n.id));
+    if (fresh.length) whatsNew = fresh;
+  } catch {
+    // no news this time: the next command asks again
+  }
+}
+
 /** A JSON request to the server. Errors print and exit, or with `soft` come back as { ok: false, why }. */
 async function api(method, p, body, soft = false) {
   const fail = (j) => (soft ? j : out(j, 1));
   const refused = apiProblem(API);
   if (refused) out({ ok: false, why: refused }, 1);
-  const headers = { "content-type": "application/json" };
+  const headers = { "content-type": "application/json", "x-kart-version": VERSION };
   const s = session();
   if (s) headers.authorization = `Bearer ${s.token}`;
-  let r;
-  try {
-    r = await fetch(API + p, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(60000) });
-  } catch (e) {
-    return fail({ ok: false, why: `server unreachable: ${e.message}`, api: API });
+  const again = repeatable(method, p);
+  const started = Date.now();
+  let waited = 0;
+  for (let n = 0; ; n++) {
+    let r = null;
+    let answer; // what kart says if it stops trying now
+    let busy; // why it may try again
+    try {
+      r = await fetch(API + p, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(60000) });
+    } catch (e) {
+      answer = { ok: false, why: `server unreachable: ${e.message}`, api: API };
+      const code = e.cause?.code || e.code;
+      if (!again && !NEVER_SENT.has(code)) return fail(answer);
+      busy = `the site is unreachable (${code || e.name})`;
+    }
+    if (r) {
+      if ((r.headers.get("content-type") || "").startsWith("image/")) return Buffer.from(await r.arrayBuffer());
+      const j = await r.json().catch(() => null);
+      if (j && r.ok && j.ok !== false) {
+        await noteNews(r.headers.get("x-agent-news"));
+        return j;
+      }
+      if (!j) {
+        // not the site's JSON: Cloudflare's error page (overloaded, down, the Worker over its limits) or a proxy's
+        answer = { ok: false, why: `bad server response (HTTP ${r.status})` };
+        if (!again && r.status !== 429) return fail(answer);
+        busy = `the site is busy (HTTP ${r.status})`;
+      } else {
+        // an error is the server's one-line reason and nothing else: no other field of its answer reaches kart's output
+        answer = { ok: false, why: plain(j.why || `the server answered HTTP ${r.status}`, 300), httpStatus: r.status };
+        const limited = r.status === 429 && r.headers.has("retry-after"); // the per-IP limit, before any route ran
+        if (!limited && !(r.status === 503 && j.retry === true && again)) return fail(answer);
+        busy = limited ? "the site is busy (too many requests from this address)" : "the site is busy (the chain or its database didn't answer)";
+      }
+    }
+    const ms = retryWait(n, r?.headers.get("retry-after"));
+    if (n >= RETRY_WAITS.length || Math.max(Date.now() - started, waited) + ms > RETRY_BUDGET) return fail(answer);
+    process.stderr.write(`kart: ${busy}, trying again in ${Math.round(ms / 1000)} s (${n + 1}/${RETRY_WAITS.length})\n`);
+    waited += ms;
+    await wait(ms * WAIT_SCALE);
   }
-  if ((r.headers.get("content-type") || "").startsWith("image/")) return Buffer.from(await r.arrayBuffer());
-  const j = await r.json().catch(() => null);
-  if (!j) return fail({ ok: false, why: `bad server response (HTTP ${r.status})` });
-  // an error is the server's one-line reason and nothing else: no other field of its answer reaches kart's output
-  if (!r.ok || j.ok === false) return fail({ ok: false, why: plain(j.why || `the server answered HTTP ${r.status}`, 300), httpStatus: r.status });
-  return j;
 }
 
 // baw is a .cmd shim on Windows, which Node can only start through a shell, where a JSON argument (the login
@@ -230,6 +324,16 @@ function fromServer(x, depth = 0) {
   if (Array.isArray(x)) return x.slice(0, 500).map((v) => fromServer(v, depth + 1));
   return Object.fromEntries(Object.entries(x).slice(0, 200).map(([k, v]) => [plain(k, 64), fromServer(v, depth + 1)]));
 }
+/** --lang for the pledge tweet: "zh" or "en", or null when not given. */
+function langFlag() {
+  if (flags.lang === undefined) return null;
+  if (flags.lang !== "zh" && flags.lang !== "en") die("--lang must be zh or en: the language of the tweet to post");
+  return flags.lang;
+}
+/** What a realm calls its first card on the ladder, in its own order: the West's Dawn Order, the East's Plum Blossom
+ *  Sect, the North's Frost Clans, the South's Sun Court. */
+const LEADERS = { West: "Grand Master", East: "Sect Master", North: "High Jarl", South: "Sultan" };
+const leaderOf = (realm) => LEADERS[realm] || "leader";
 const MATCH_ID = /^[0-9a-f]{12}$/;
 /** A match id from the server, only if it is one (it goes into kart's own hints and links). */
 const safeMatchId = (id) => (MATCH_ID.test(String(id)) ? String(id) : "<id>");
@@ -469,7 +573,7 @@ const commands = {
       commands: {
         "kart login": "sign in with one free signature from baw (moves no funds); lasts 30 days",
         "kart status": "your pre-registration, card and the server state",
-        "kart join --region REGION [--ref CODE]": "pre-register and pledge to a realm (west, east, north, south); prints the tweet to post",
+        "kart join --region REGION [--role ROLE] [--ref CODE] [--lang zh]": "pre-register and pledge to a realm (west, east, north, south); prints the tweet to post and postLink, which opens X with it. --role picks the role your card page shows, until your post is verified; --lang zh writes the tweet in Chinese",
         "kart verify <tweet-url>": "verify your pre-registration tweet",
         "kart preview [--region REGION] [--role ROLE] [--out card.svg]": "your stats, class and rarity for each role, and a preview image",
         "kart mint --role ROLE [--region REGION] [--yes]": "simulate the free mint; --yes sends it (gas only). ROLE: warrior, priest, mage, assassin. The realm defaults to your pledge: the preview shows the one the signed mint carries. The name, role, realm and stats shown are read from the signed transaction itself",
@@ -484,16 +588,16 @@ const commands = {
         "kart challenge <card-id> [--live] [--card ID]": "duel another card. Without --live both saved programs play it at once; with --live its agent must accept, then you both pick every round. Between two ladder cards of different owners it is rated: both ratings move (K 16), up to 5 rated challenges a day per card and one rated fight a day per pair",
         "kart accept <match-id>": "accept a live challenge (it waits 10 minutes), then play it with kart turn",
         "kart decline <match-id>": "decline a live challenge",
-        "kart matches [--card ID]": "your open and recent duels, with their watch links",
+        "kart matches [--card ID] [--limit N] [--before TIME]": "your open and recent duels, with their watch links, whether each was rated and its rating change: the last 20, or up to 100 with --limit; the more line gives the command for older ones",
         "kart match [<match-id>] [--log]": "a duel's state for picking a move: round, seconds left, HP %, Focus, the last round, the opponent's last 3 moves. Without an id: your live duel",
         "kart turn <move|mix> [--reason TEXT] [--match ID]": "lock in this round's move within 30 s: strike, guard, break, charge, skill, or a mix like guard:60,break:40. Waits for the round, then prints it and what's next",
         "kart replay <match-id>": "re-play a finished duel on this machine from its revealed seed and check the server's log",
-        "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (Protector, Bannerman or Soldier of its realm), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB, plus the project's 0.5 BNB in Season 1) and your card's place among the cards that share it",
+        "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (in its realm's own order: the West's Dawn Order, the East's Plum Blossom Sect, the North's Frost Clans, the South's Sun Court), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB, plus the project's 14.3 BNB in Season 1, about $10,000) and your card's place among the cards that share it",
         "kart pool": "the season pool payouts this wallet can claim from the RewardPool contract: season, BNB, cards and until when (90 days from funding)",
         "kart pool claim [--season N] [--yes]": "simulate claiming this wallet's season pool BNB (gas only; the amount's proof is checked against the root on chain); --yes sends it",
         "kart ladder join [--card ID]": "enter your card in the ranked ladder (one card per owner): its rule program plays a ranked duel every 4 hours",
         "kart ladder leave": "take your card off the ladder",
-        "kart ladder top [--n 20] [--realm REALM]": "the leaderboard with each card's realm title; --realm west|east|north|south shows that realm's standings, its first card being its Protector",
+        "kart ladder top [--n 20] [--realm REALM]": "the leaderboard with each card's realm title; --realm west|east|north|south shows that realm's standings, its first card being its Protector (the East's Sect Master)",
         "kart quests [--card ID]": "today's three quests (scout, tinker, duel): each pays XP once a day and completes on its own",
         "kart shop": "prices: fight packs (10 fights; the big pack is 4 packs for 50), the season pass (10 extra fights a day for 14 days) and the market fee. Once cards exist, a price changes only 48 hours after it is proposed on chain. Holo and frames are never sold",
         "kart holo": "how Holo is earned: it can't be bought (the season's top 100 on the ladder, the wheel, the first 100 verified pre-registrations, and the top 10 inviters when minting opens)",
@@ -512,6 +616,7 @@ const commands = {
         "kart wheel [--card ID]": "your free wheel tickets, the published odds and your last spins",
         "kart wheel spin [--card ID]": "spend one ticket on a free spin: XP, free fights, Holo or, rarely, a Mythic",
         "kart level [--card ID]": "the level your card has earned, the level it shows on chain, and whether it can sync",
+        "kart evolve [--side light|dark] [--card ID] [--tweet URL] [--yes --max-bnb X]": "simulate evolving a card that has earned the level: it picks a side, Light or Dark, for good (costs BNB: ask your human). --tweet with the link of the post it prints takes the discounted price, one per X account; --yes with --max-bnb sends it. Without --card it is the card your Agent ID minted, read from the chain",
         "kart level sync [--card ID] [--yes]": "simulate writing the earned level onto the card on chain; --yes sends it (gas only). Without --card it is the card your Agent ID minted, read from the chain; the level shown is read from the transaction",
         "kart fairness": "how rarity rolls and wheel spins work, the published hashes of their secrets and the revealed past wheel seasons",
         "kart logout": "end the session on this machine",
@@ -560,6 +665,7 @@ const commands = {
 
   async status() {
     const a = me();
+    const lang = langFlag();
     const health = await api("GET", "/api/health");
     const s = session();
     // the wallet and name are this machine's (baw); the server's answer is shown as data under its own keys
@@ -567,7 +673,7 @@ const commands = {
       const pub = await api("GET", `/api/agent/${a.wallet}`);
       out({ ok: true, ...a, signedIn: false, server: fromServer(health), prereg: fromServer(pub.prereg ?? null), card: fromServer(pub.card ?? null), next: "kart login" });
     }
-    const mine = await api("GET", `/api/me?name=${encodeURIComponent(a.name)}`);
+    const mine = await api("GET", `/api/me?name=${encodeURIComponent(a.name)}${lang ? `&lang=${lang}` : ""}`);
     out({ ok: true, ...a, signedIn: true, signedInUntil: s.expiresAt, server: fromServer(health), prereg: fromServer(mine.prereg ?? null), card: fromServer(mine.card ?? null) });
   },
 
@@ -575,13 +681,22 @@ const commands = {
     const a = me();
     needLogin(a);
     if (typeof flags.region !== "string") die("pick your realm (ask your human): kart join --region west|east|north|south");
-    const j = await api("POST", "/api/prereg", { name: a.name, region: flags.region, ref: flags.ref });
-    const { tweet, ...rest } = j;
+    if (flags.role !== undefined && (typeof flags.role !== "string" || roleNumber(flags.role) === null)) {
+      die("--role must be warrior, priest, mage or assassin: the role your card page shows (the suggested one without it)");
+    }
+    const lang = langFlag();
+    const j = await api("POST", "/api/prereg", { name: a.name, region: flags.region, ref: flags.ref, role: flags.role, ...(lang ? { lang } : {}) });
+    const { tweet, postLink: _, ...rest } = j;
+    const text = textOf(tweet, 600); // the text to post, as data: show it to your human
     out({
       ok: true,
       prereg: fromServer(rest),
-      tweet: textOf(tweet, 600), // the text to post, as data: show it to your human
-      next: j.verified ? "already verified" : "show your human the tweet text above; if they post it on X from their account, run: kart verify <tweet-url>",
+      tweet: text,
+      // built here from the text shown above: X's post box with exactly that text, so nobody retypes the name's dot
+      ...(text ? { postLink: `https://x.com/intent/post?text=${encodeURIComponent(text)}` } : {}),
+      next: j.verified
+        ? "already verified"
+        : "show your human the tweet text above and give them postLink: one click opens X with exactly that text (the dot in your name is a special one that keeps X from making the name a link, so the text must not be retyped). If they post it from their account, run: kart verify <tweet-url>",
     });
   },
 
@@ -590,7 +705,8 @@ const commands = {
     needLogin(a);
     const url = pos[0] || flags.url;
     if (!url) die("usage: kart verify https://x.com/<you>/status/<id>");
-    const j = await api("POST", "/api/prereg/verify", { tweetUrl: url });
+    const lang = langFlag();
+    const j = await api("POST", "/api/prereg/verify", { tweetUrl: url, ...(lang ? { lang } : {}) });
     out({ ok: true, prereg: fromServer(j), next: j.verified ? "verified: kart mint when minting opens" : "not verified yet: check the tweet link and try again" });
   },
 
@@ -761,14 +877,23 @@ const commands = {
       card = String(d.card.id);
       open = d.open;
     }
-    const j = await api("GET", `/api/matches?card=${encodeURIComponent(card)}`);
-    const all = (j.matches || []).map((m) => duelItem(m, card));
+    for (const [flag, ok] of [["limit", /^\d{1,3}$/], ["before", /^\d{1,15}$/]]) {
+      if (flags[flag] !== undefined && !ok.test(String(flags[flag]))) die(`--${flag} must be a whole number`);
+    }
+    const page = `${flags.limit !== undefined ? `&limit=${flags.limit}` : ""}${flags.before !== undefined ? `&before=${flags.before}` : ""}`;
+    const j = await api("GET", `/api/matches?card=${encodeURIComponent(card)}${page}`);
+    const all = (j.matches || []).map((m) => ({
+      ...duelItem(m, card),
+      ...(m.rated ? { rated: true } : {}),
+      ...(m.ratingChange === null || m.ratingChange === undefined ? {} : { ratingChange: Number(m.ratingChange) }),
+    }));
     open ??= all.filter((m) => m.status === "pending" || m.status === "live");
     out({
       ok: true,
       card,
       open,
       recent: all.filter((m) => !open.some((o) => o.id === m.id)),
+      ...(j.next ? { more: `kart matches --card ${card}${flags.limit !== undefined ? ` --limit ${flags.limit}` : ""} --before ${Number(j.next)}` } : {}),
       next: "kart match <id> shows one duel; kart replay <id> checks a finished one",
     });
   },
@@ -1089,17 +1214,54 @@ const commands = {
     needLogin(a);
     const card = cardFlag() ? `&card=${encodeURIComponent(cardFlag())}` : "";
     const j = await api("GET", `/api/quests?name=${encodeURIComponent(a.name)}${card}`);
-    const open = j.quests.filter((q) => !q.done);
+    const rows = j.quests.filter((q) => !q.news); // a row marked news is a note from the site, not a quest
+    const notes = j.quests.filter((q) => q.news).map((q) => plain(q.title, 40));
+    const open = rows.filter((q) => !q.done);
     out({
       ok: true,
       card: j.card,
       day: j.day,
       level: j.level,
       xp: `${j.xp}/${j.xpToNext}`,
-      quests: j.quests.map((q) => `${q.done ? "done" : "open"}: ${plain(q.title, 40)}, +${Number(q.xp)} XP${q.done ? "" : `: ${plain(q.how, 120)}`}`),
+      quests: rows.map((q) => `${q.done ? "done" : "open"}: ${plain(q.title, 40)}, +${Number(q.xp)} XP${q.done ? "" : `: ${plain(q.how, 120)}`}`),
+      ...(notes.length ? { news: notes } : {}),
       resetsAt: plain(j.resetsAt, 32),
       next: open.length ? `${open.length} open: they complete on their own when you do them` : `all done; new quests at ${plain(j.resetsAt, 32)}`,
     });
+  },
+
+  async evolve() {
+    const a = me();
+    needLogin(a);
+    if (!EVOLUTION) die(`card evolution isn't open in this kart (${VERSION}): reinstall the skill once it opens`);
+    const card = await ownCard(a);
+    const SIDES = { light: 1n, dark: 2n };
+    const side = flags.side === undefined ? undefined : String(flags.side).toLowerCase();
+    if (side !== undefined && !SIDES[side]) die("--side must be light or dark");
+    if (flags.tweet === true) die("--tweet needs the link of your human's post");
+    // the stage, a side already chosen and the price limit come from the chain, never from the server
+    const read = async (fn, ...args) => {
+      try {
+        return await fn(RPC, EVOLUTION, ...args);
+      } catch (e) {
+        return die(`could not read the chain: ${String(e.message).slice(0, 160)}`);
+      }
+    };
+    const [stageNow, sideNow] = [await read(chain.evolutionStage, card), await read(chain.evolutionSide, card)];
+    if (sideNow && side && SIDES[side] !== sideNow) die(`card #${card} took the other side at its first evolution: a side never changes`);
+    const stage = stageNow + 1n;
+    const limit = await read(chain.evolutionMax, stage);
+    if (limit === 0n) die(`card #${card} is at stage ${stageNow}, and stage ${stage} isn't open`);
+    const j = await api("POST", "/api/evolve", { name: a.name, card, ...(side ? { side } : {}), ...(flags.tweet ? { tweetUrl: flags.tweet } : {}) });
+    const voucher = decodeCall(j.calldata)?.args?.[0];
+    const price = voucher ? voucher.price : 0n;
+    const chosen = ["", "light", "dark"][Number(voucher?.side ?? 0)] || side || "";
+    const again = `kart evolve --side ${chosen} --card ${card}${flags.tweet ? ` --tweet ${plain(flags.tweet, 80)}` : ""} --yes --max-bnb ${formatBnb(price)}`;
+    const hash = await simulateAndSend(a, { to: j.to, value: j.value, calldata: j.calldata }, `looks clean; it costs ${formatBnb(price)} BNB and the side never changes. With your human's OK: ${again}`, {
+      fn: "evolve", id: card, stage, side: sideNow || (side ? SIDES[side] : undefined), maxPrice: limit, value: price,
+    }, { extra: { expiresAt: plain(j.expiresAt, 32), ...(j.discount ? { discount: fromServer(j.discount) } : {}) } });
+    await untilMined(() => api("POST", "/api/evolve/sync", { txHash: hash }, true));
+    out({ ok: true, sent: true, txHash: hash, next: `kart card ${card} shows it once mined` });
   },
 
   async level() {
@@ -1136,7 +1298,7 @@ const commands = {
     const sub = pos[0] || "status";
     if (sub === "top") {
       const n = Math.max(1, Math.min(100, Number(flags.n) || 20));
-      // --realm: that realm's cards only, in ladder order; its first is the realm's Protector
+      // --realm: that realm's cards only, in ladder order; its first is the realm's leader (leaderOf)
       const realm = flags.realm === undefined ? null : regionNumber(flags.realm);
       if (flags.realm !== undefined && realm === null) die(`${plain(flags.realm, 24)} is not a realm: --realm west|east|north|south`);
       const slug = realm === null ? "" : REGION_NAMES[realm];
@@ -1148,8 +1310,8 @@ const commands = {
         nextRound: plain(j.nextRound, 32),
         cards: Number(j.cards),
         ...(name ? { realm: name } : {}),
-        top: j.standings.map((r) => `#${Number(r.rank)} ${plain(r.name)} (card ${safeCardId(r.card)}, ${plain(r.className, 32)}, L${Number(r.level)}): ${Number(r.rating)} ${plain(r.league, 16)}, ${Number(r.record.wins)}-${Number(r.record.losses)}-${Number(r.record.draws)}${r.title ? `, ${plain(r.title, 32)}` : ""}`),
-        ...(name && !j.standings.length ? { note: `the ${name} has no Protector yet: its first card on the ladder becomes its Protector` } : {}),
+        top: j.standings.map((r) => `#${Number(r.rank)} ${plain(r.name)} (card ${safeCardId(r.card)}, ${plain(r.className, 32)}, L${Number(r.level)}): ${Number(r.rating)} ${plain(r.league, 16)}, ${Number(r.record.wins)}-${Number(r.record.losses)}-${Number(r.record.draws)}${r.title ? `, ${plain(r.title, 48)}` : ""}`),
+        ...(name && !j.standings.length ? { note: `the ${name} has no ${leaderOf(name)} yet: its first card on the ladder becomes its ${leaderOf(name)}` } : {}),
         page: `${API}/ladder${slug ? `?realm=${slug}` : ""}`,
       });
     }
@@ -1183,15 +1345,18 @@ const commands = {
       card: safeCardId(j.card),
       inLadder: !!j.inLadder,
       ...(j.inLadder ? { rating: Number(j.rating), league: plain(j.league, 16), rank: Number(j.rank), best: Number(j.best), record: fromServer(j.record) } : {}),
-      // its realm title (Protector, Bannerman or Soldier of its realm) and its place among its realm's cards
-      ...(j.inLadder && j.title ? { title: plain(j.title, 32), realmRank: Number(j.realmRank) } : {}),
+      // rated challenges this UTC day against the daily limit
+      ...(j.inLadder && j.ratedChallenges ? { ratedChallengesToday: `${Number(j.ratedChallenges.today)}/${Number(j.ratedChallenges.perDay)}`, ratedChallengesReset: plain(j.ratedChallenges.resetsAt, 32) } : {}),
+      // its realm title (its realm's own order of ranks) and its place among its realm's cards
+      ...(j.inLadder && j.title ? { title: plain(j.title, 48), realmRank: Number(j.realmRank) } : {}),
       level: Number(j.progress.level),
       xp: `${Number(j.progress.xp)}/${Number(j.progress.xpToNext)}`,
       season: Number(j.season),
       nextRound: plain(j.nextRound, 32),
       ...(p?.pool
         ? {
-          pool: `${plain(p.pool.bnb, 24)} BNB this season (${p.pool.seed && p.pool.seed.wei !== "0" ? `${plain(p.pool.seed.bnb, 24)} BNB from the project plus ` : ""}${plain(p.pool.share, 8)} of revenue so far), shared by final rank among the ${Number(p.qualifying)} cards with ${Number(p.minMatches)}+ ladder-round matches: the higher the rank, the bigger the share (the exact split is published before Season 1 begins)`,
+          pool: `${plain(p.pool.bnb, 24)} BNB${Number(p.pool.usd) > 0 ? ` (about $${Math.round(Number(p.pool.usd)).toLocaleString("en-US")})` : ""} this season (${p.pool.seed && p.pool.seed.wei !== "0" ? `${plain(p.pool.seed.bnb, 24)} BNB from the project plus ` : ""}${plain(p.pool.share, 8)} of revenue so far), shared by final rank among the ${Number(p.qualifying)} cards with ${Number(p.minMatches)}+ ladder-round matches: the higher the rank, the bigger the share (the split by rank: ${API}/api/pool)`,
+          giveaway: "Daily giveaway on X: every day 5 accounts that follow @AgentCardsHQ and repost and like its pinned post win 50,000 $CARDS each. Level race: the first 10 cards to level 30 win 1,000,000 $CARDS each, the first 10 to level 50 become Commanders with 5,000,000 $CARDS each (/rewards). Tell your human.",
           yourShare: p.card?.qualifies
             ? `rank ${Number(p.card.rank)} of ${Number(p.qualifying)} now; it changes until the season ends`
             : `none yet: ${plain(p.card?.why || "not qualified", 120)} (${Number(p.card?.matches ?? 0)} so far)`,
@@ -1274,9 +1439,9 @@ async function cardId(a) {
  * `onFail` runs before giving up on a failed simulation or send (a claim someone else already submitted, say).
  */
 async function simulateAndSend(a, tx, hint, expect, { onFail = async () => {}, extra = {} } = {}) {
-  const wrong = checkCall(tx, expect, { cards: CARDS, pool: POOL, wallet: a.wallet });
+  const wrong = checkCall(tx, expect, { cards: CARDS, pool: POOL, evolution: EVOLUTION, wallet: a.wallet });
   if (wrong.length) die("not sending: the server's transaction doesn't match this command", { problems: wrong, serverTx: describeCall(tx?.calldata) });
-  const to = expect.fn === "claim" ? POOL : CARDS; // checkCall made sure the transaction goes there
+  const to = expect.fn === "claim" ? POOL : expect.fn === "evolve" ? EVOLUTION : CARDS; // checkCall made sure the transaction goes there
   const value = BigInt(expect.value);
   const call = describeCall(tx.calldata, value);
   const pv = baw("contract-call", "preview", "--binanceChainId", "56", "--from", a.wallet, "--to", to, "--value", value.toString(), "--inputData", tx.calldata);

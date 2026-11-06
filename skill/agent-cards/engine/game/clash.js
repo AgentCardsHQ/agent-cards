@@ -18,14 +18,14 @@ export const ENGINE = "clash-1"; // stored with every match so old replays keep 
 const TOP_RARITY = 3; // Mythic cards (rarity 4) play at Legendary strength: only their art, name and number differ
 
 /**
- * A fighter from a card: { region, role, awakened, rarity, level, power, defense, speed, luck, name? }.
+ * A fighter from a card: { region, role, awakened, rarity, level, power, defense, speed, luck, name?, stage? }.
  * mode "ranked" keeps level and rarity small (the ladder); "full" lets them count (dungeons, friendly fights).
  */
 export function fighter(card, mode = "ranked") {
   const R = ROLES[card.role];
   const cls = classOf(card.region, card.role, card.awakened);
   const sc = T.scaling[mode] || T.scaling.ranked;
-  const edge = (1 + sc.level * (card.level - 1)) * (1 + sc.rarity * Math.min(card.rarity, TOP_RARITY));
+  const edge = (1 + sc.level * (card.level - 1)) * (1 + sc.rarity * Math.min(card.rarity, TOP_RARITY)) * (1 + (T.evolution[card.stage] ?? 0));
   const hpMax = T.hp * R.hp * (1 + T.stat * (card.defense - 50)) * edge;
   return {
     name: card.name || cls.name,

@@ -4,6 +4,9 @@
 import { skillText } from "./game/skills.js";
 
 export const REGIONS = ["West", "East", "North", "South"]; // index = on-chain region number
+export const EAST = 1;
+/** The East's cards form a cultivation sect: its ladder titles (ladder.js) and pledge tweets (xcheck.js) name it. */
+export const EAST_SECT = { en: "Plum Blossom Sect", zh: "梅花宗" };
 
 const CLASSES = {
   // region: [Warrior, Priest, Mage, Assassin]

@@ -20,6 +20,7 @@ export const SELECTORS = {
   update: "0xf94ac82f", // update(Update,bytes)
   claimMythic: "0xf2199b82", // claimMythic(MythicClaim,bytes)
   claim: "0xae0b51df", // RewardPool.claim(uint256,uint256,bytes32[])
+  evolve: "0xd9be9c36", // CardEvolution.evolve(Voucher,bytes)
 };
 export const READS = {
   priceOf: "0xb9186d7d", // priceOf(uint256)
@@ -31,8 +32,12 @@ export const READS = {
   ownerOf: "0x6352211e", // ownerOf(uint256)
   seasons: "0xf5d709a1", // RewardPool.seasons(uint256): root, funded, claimed, claimEnds, swept
   claimed: "0x120aa877", // RewardPool.claimed(uint256,address)
+  stageOf: "0xc7d25b15", // CardEvolution.stageOf(uint256)
+  sideOf: "0x3576de3a", // CardEvolution.sideOf(uint256): 1 Light, 2 Dark, 0 before the first evolution
+  maxPrice: "0x7229aa80", // CardEvolution.maxPrice(uint8): the most a stage can cost, 0 while it is closed
 };
-const ON_POOL = new Set(["claim"]); // functions of RewardPool; every other one is AgentCards'
+const ON_POOL = new Set(["claim"]); // functions of RewardPool
+const ON_EVOLUTION = new Set(["evolve"]); // functions of CardEvolution; every other one is AgentCards'
 const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
@@ -117,6 +122,7 @@ export const ARGS = {
   update: [{ id: "uint256", level: "uint16", badges: "uint32", issuedAt: "uint64", expiry: "uint64" }, "bytes"],
   claimMythic: [{ to: "address", design: "uint256", nonce: "uint256", expiry: "uint64" }, "bytes"],
   claim: ["uint256", "uint256", "bytes32[]"],
+  evolve: [{ holder: "address", id: "uint256", stage: "uint8", side: "uint8", price: "uint256", expiry: "uint64" }, "bytes"],
 };
 const BITS = { address: 160n, uint8: 8n, uint16: 16n, uint32: 32n, uint64: 64n, uint256: 256n };
 const isDynamic = (t) => t === "bytes" || t === "string" || t === "bytes32[]" || (typeof t === "object" && Object.values(t).some(isDynamic));
@@ -211,7 +217,7 @@ const same = (a, b) => String(a ?? "").toLowerCase() === String(b ?? "").toLower
  */
 export function checkCall(tx, expect, ctx) {
   const bad = [];
-  const [target, name] = ON_POOL.has(expect.fn) ? [ctx.pool, "RewardPool"] : [ctx.cards, "Agent Cards"];
+  const [target, name] = ON_POOL.has(expect.fn) ? [ctx.pool, "RewardPool"] : ON_EVOLUTION.has(expect.fn) ? [ctx.evolution, "CardEvolution"] : [ctx.cards, "Agent Cards"];
   if (!target) return [`this kart has no ${name} contract address (release.json): reinstall the skill`];
   if (!same(tx?.to, target)) bad.push(`it goes to ${tx?.to}, not the ${name} contract ${target}`);
   const call = decodeCall(tx?.calldata);
@@ -274,6 +280,19 @@ export function checkCall(tx, expect, ctx) {
       else if (!verifyPoolProof(proof, expect.root, ctx.pool, arg(0), ctx.wallet, expect.amount)) bad.push("its proof doesn't lead to the pool's root on chain for this wallet and amount");
       break;
     }
+    case "evolve": {
+      // the server sets the price in the voucher (a discount is its business), so it is checked against the limit the
+      // contract holds; the card, the next stage and a side already chosen come from the command and the chain
+      const v = arg(0);
+      if (!same(addr(v.holder), ctx.wallet)) bad.push("the voucher doesn't name this wallet");
+      want("card", v.id, expect.id);
+      want("stage", v.stage, expect.stage);
+      if (expect.side !== undefined) want("side", v.side, expect.side);
+      if (expect.maxPrice === undefined || v.price > BigInt(expect.maxPrice)) bad.push(`its price ${formatBnb(v.price)} BNB is above the contract's limit`);
+      want("price", v.price, expect.value);
+      signed(arg(1));
+      break;
+    }
     default:
       bad.push(`no rule for ${expect.fn}`);
   }
@@ -318,6 +337,10 @@ export function describeCall(calldata, value = null) {
       return { does: `buy the next copy of Mythic design ${a}${pays}`, design: Number(a), ...paid };
     case "update":
       return { does: `write level ${a.level} onto card #${a.id}`, card: String(a.id), level: Number(a.level) };
+    case "evolve": {
+      const side = ["", "Light", "Dark"][Number(a.side)] || "an unknown";
+      return { does: `evolve card #${a.id} to stage ${a.stage}, ${side} side${pays}`, card: String(a.id), stage: Number(a.stage), side, ...paid };
+    }
     case "claimMythic":
       return { does: `claim a wheel copy of Mythic design ${a.design} for ${addr(a.to)}`, design: Number(a.design), winner: addr(a.to) };
     case "mint": {
@@ -517,6 +540,10 @@ export const chain = {
   claimUsed: async (rpc, cards, nonce) => wordOf(await ethCall(rpc, cards, READS.claimUsed + u256(nonce)), 0) === 1n,
   cardOfAgentId: async (rpc, cards, agentId) => wordOf(await ethCall(rpc, cards, READS.cardOfAgentId + u256(agentId)), 0),
   ownerOf: async (rpc, cards, id) => addr(wordOf(await ethCall(rpc, cards, READS.ownerOf + u256(id)), 0)),
+  // CardEvolution: a card's stage and side, and the most a stage can cost
+  evolutionStage: async (rpc, evolution, id) => wordOf(await ethCall(rpc, evolution, READS.stageOf + u256(id)), 0),
+  evolutionSide: async (rpc, evolution, id) => wordOf(await ethCall(rpc, evolution, READS.sideOf + u256(id)), 0),
+  evolutionMax: async (rpc, evolution, stage) => wordOf(await ethCall(rpc, evolution, READS.maxPrice + u256(stage)), 0),
   // RewardPool: a season's funding and whether a wallet has claimed it
   poolSeason: async (rpc, pool, season) => {
     const r = await ethCall(rpc, pool, READS.seasons + u256(season));

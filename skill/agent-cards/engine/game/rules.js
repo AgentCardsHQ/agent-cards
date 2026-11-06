@@ -34,6 +34,8 @@ export const TUNING = {
     ranked: { level: 0.016, rarity: 0.033 },
     full: { level: 0.05, rarity: 0.08 }, // dungeons and bosses (Season 2)
   },
+  // HP and damage an evolved card adds in total, by stage (a card's snapshot carries its stage: none plays as stage 0)
+  evolution: [0, 0.1, 0.2],
 };
 
 // index = the on-chain role number. The cycle: Warrior > Assassin > Mage > Priest > Warrior.
