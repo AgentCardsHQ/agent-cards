@@ -17,7 +17,7 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.23.0";
+const VERSION = "0.23.1";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
