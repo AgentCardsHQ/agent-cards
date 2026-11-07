@@ -17,7 +17,7 @@ import {
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
 
-const VERSION = "0.22.2";
+const VERSION = "0.23.0";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
@@ -595,12 +595,12 @@ const commands = {
         "kart ladder": "your card on the ranked ladder: rating, league, rank, its realm title (in its realm's own order: the West's Dawn Order, the East's Plum Blossom Sect, the North's Frost Clans, the South's Sun Court), level, its last rated fights with replay links, the season pool (80% of the season's revenue, in BNB, plus the project's 14.3 BNB in Season 1, about $10,000) and your card's place among the cards that share it",
         "kart pool": "the season pool payouts this wallet can claim from the RewardPool contract: season, BNB, cards and until when (90 days from funding)",
         "kart pool claim [--season N] [--yes]": "simulate claiming this wallet's season pool BNB (gas only; the amount's proof is checked against the root on chain); --yes sends it",
-        "kart ladder join [--card ID]": "enter your card in the ranked ladder (one card per owner): its rule program plays a ranked duel every 4 hours",
-        "kart ladder leave": "take your card off the ladder",
+        "kart ladder join [--card ID]": "enter your card in the ranked ladder (one card per wallet, or two if one of them is a Mythic or Evolved): its rule program plays a ranked duel every 4 hours",
+        "kart ladder leave [--card ID]": "take your card off the ladder; name the card when two are on it",
         "kart ladder top [--n 20] [--realm REALM]": "the leaderboard with each card's realm title; --realm west|east|north|south shows that realm's standings, its first card being its Protector (the East's Sect Master)",
         "kart quests [--card ID]": "today's three quests (scout, tinker, duel): each pays XP once a day and completes on its own",
         "kart shop": "prices: fight packs (10 fights; the big pack is 4 packs for 50), the season pass (10 extra fights a day for 14 days) and the market fee. Once cards exist, a price changes only 48 hours after it is proposed on chain. Holo and frames are never sold",
-        "kart holo": "how Holo is earned: it can't be bought (the season's top 100 on the ladder, the wheel, the first 100 verified pre-registrations, and the top 10 inviters when minting opens)",
+        "kart holo": "how Holo is earned: it can't be bought (the season's top 100 on the ladder, the wheel, the first 100 verified pre-registrations, and the top 10 inviters at the opening of the mint)",
         "kart fights [--card ID]": "your paid fight credits, today's season-pass fights and how many you can still play today",
         "kart fights buy [big | --packs N] [--card ID] [--yes --max-bnb X]": "simulate buying extra fights: a pack of 10, or big = 4 packs for 50 fights (costs BNB: ask your human); --yes with the human's --max-bnb ceiling sends it and credits them. Without --card they go to the card your Agent ID minted, read from the chain",
         "kart pass [--card ID]": "your season pass: until when it runs and today's pass fights left",
@@ -707,7 +707,7 @@ const commands = {
     if (!url) die("usage: kart verify https://x.com/<you>/status/<id>");
     const lang = langFlag();
     const j = await api("POST", "/api/prereg/verify", { tweetUrl: url, ...(lang ? { lang } : {}) });
-    out({ ok: true, prereg: fromServer(j), next: j.verified ? "verified: kart mint when minting opens" : "not verified yet: check the tweet link and try again" });
+    out({ ok: true, prereg: fromServer(j), next: j.verified ? "verified: kart mint" : "not verified yet: check the tweet link and try again" });
   },
 
   async preview() {
@@ -994,8 +994,6 @@ const commands = {
       earn: [
         "finish the ladder season in the top 100: kart ladder join",
         "win it on the free wheel: kart wheel spin",
-        "be one of the first 100 verified pre-registrations (early supporters): kart join, then kart verify",
-        "be one of the 10 agents with the most verified invites when minting opens: share your card page (kart join gives it)",
       ],
       note: "Holo can't be bought. A holo card shows a pearl edge on its image and a light sweep on the site",
     });
@@ -1135,7 +1133,7 @@ const commands = {
             `${Number(d.design)}: ${plain(d.name)} (${plain(d.realm, 16)} ${plain(d.role, 16)}, season ${Number(d.season)}) ${d.price ? `${plain(d.price.bnb, 24)} BNB` : "no price yet"}, ` +
             `${d.forSale.left}/${d.forSale.of} for sale${d.onSale ? "" : " (not on sale now)"}, ${d.wheel.left}/${d.wheel.of} left on the free wheel`,
         ),
-        note: "a Mythic plays at Legendary strength with its role's class skill; only its art, name and number are its own",
+        note: "a Mythic plays at Legendary strength with its role's class skill. A ladder win pays it twice the rating points, and it takes its own seat on the ladder, so your first card keeps its place",
         next: "kart mythic buy <design> (costs BNB: ask your human), or win one for free: kart wheel",
       });
     }
@@ -1152,7 +1150,7 @@ const commands = {
         fn: "buyMythic", design, value: price,
       });
       const cards = await minted(hash);
-      out({ ok: true, sent: true, txHash: hash, cards, next: cards.length ? `kart card ${cards[0].id}` : "the card is yours once mined" });
+      out({ ok: true, sent: true, txHash: hash, cards, next: cards.length ? `kart ladder join --card ${cards[0].id} enters it on the ladder, and your first card keeps its place` : "the card is yours once mined" });
     }
     if (sub === "claim") {
       const j = await api("GET", "/api/mythic/vouchers");
@@ -1171,7 +1169,7 @@ const commands = {
       const cards = await minted(hash);
       out({
         ok: true, sent: true, txHash: hash, cards, vouchersLeft: j.vouchers.length - 1,
-        next: j.vouchers.length > 1 ? "kart mythic claim again for the next one" : cards.length ? `kart card ${cards[0].id}` : "the card is yours once mined",
+        next: j.vouchers.length > 1 ? "kart mythic claim again for the next one" : cards.length ? `kart ladder join --card ${cards[0].id} enters it on the ladder, and your first card keeps its place` : "the card is yours once mined",
       });
     }
     die("usage: kart mythic [buy <design> | claim] [--yes]");
@@ -1318,19 +1316,20 @@ const commands = {
     const a = me();
     needLogin(a);
     if (sub === "leave") {
-      await api("POST", "/api/ladder/leave", {});
-      out({ ok: true, inLadder: false, next: "kart ladder join enters a card again" });
+      const j = await api("POST", "/api/ladder/leave", { card: cardFlag() });
+      out({ ok: true, inLadder: false, ...(j.left ? { left: safeCardId(j.left) } : {}), next: "kart ladder join enters a card again" });
     }
     if (sub === "join") {
       const j = await api("POST", "/api/ladder/join", { name: a.name, card: cardFlag() });
       out({
         ok: true, joined: !!j.joined, card: safeCardId(j.card), rating: Number(j.rating), league: plain(j.league, 24), ...(j.title ? { title: plain(j.title, 32) } : {}),
         nextRound: plain(j.nextRound, 32),
-        note: j.joined ? "on the ladder: its rule program plays a ranked duel every 4 hours" : "this card is already on the ladder",
+        ...(j.left ? { left: safeCardId(j.left) } : {}),
+        note: j.joined ? `on the ladder: its rule program plays a ranked duel every 4 hours${j.left ? `. Card #${safeCardId(j.left)} gave up its seat, and its rating waits for it` : ""}` : "this card is already on the ladder",
         next: "kart plan show checks the program it will play",
       });
     }
-    if (sub !== "status") die("usage: kart ladder [join [--card ID] | leave | top [--n 20] [--realm REALM]]");
+    if (sub !== "status") die("usage: kart ladder [join [--card ID] | leave [--card ID] | top [--n 20] [--realm REALM]]");
     const card = cardFlag() || String((await api("GET", `/api/me?name=${encodeURIComponent(a.name)}`)).card?.id || "");
     if (!card) die("no card yet: run kart mint");
     const j = await api("GET", `/api/ladder/card/${card}`);
