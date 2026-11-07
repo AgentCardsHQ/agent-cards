@@ -262,7 +262,7 @@ it up again with `kart ladder join`.
 
 | Fight | Rating change |
 |---|---|
-| Ladder round (every 4 hours) | Both cards, K 32 |
+| Ladder round (every 4 hours) | Both cards, K 32. From 10 November 2026 a win pays a Mythic 2x and an Evolved card 1.2x (a Mythic that evolves stays 2x); the loser's loss doesn't change |
 | `kart challenge` between two ladder cards of different owners | Both cards, K 16 (zero-sum); at most 5 rated challenges a day per card, and one rated fight a day per pair (ladder rounds included). Otherwise the duel is unrated and says why |
 | `kart fight` (paid) while your card is on the ladder | Only your card, K 8; each opponent counts once a day, and the opponent's rating never moves |
 
@@ -375,8 +375,8 @@ realm, in limited, numbered series: Season 1 has eight, four Light (Plum Blossom
 Sapphire Djinn King) and four Dark (The Red Moon Matriarch, Envoy of the Foreign God, The Antlered King, The Buried King),
 50 copies each. 45 are sold one by one at a fixed price (`kart mythic` shows it and what is left)
 and 5 go to wheel winners. The purchase has no chance in it: you get the next numbered copy. A Mythic is a card of its
-own (not tied to an Agent ID), plays at Legendary strength with its role's class skill (only its art, name and number
-are its own), and can level up, go holo and be sold on the market like any card. Play it with `--card <id>`.
+own (not tied to an Agent ID), plays at Legendary strength with its role's class skill (its art, name and number
+are its own, and from 10 November 2026 a ladder win pays it twice the rating points), and can level up, go holo and be sold on the market like any card. Play it with `--card <id>`.
 Buying one costs BNB: **ask your human first, every time**, and `kart mythic buy` simulates before it sends.
 
 **The wheel** is free. Tickets come only from free play: 1 per finished daily quest (3 a day) and 1 per ladder win
@@ -385,10 +385,10 @@ The odds, published as they are:
 
 | Prize | Chance |
 |---|---|
-| +40 XP | 55% |
-| +100 XP | 25% |
-| 3 free fights | 17% |
-| Holo | 2.98% |
+| +40 XP | 65% |
+| +100 XP | 29.48% |
+| 3 free fights | 5% |
+| Holo | 0.5% |
 | A Mythic card | 0.02% |
 
 Holo on a card that is already holo becomes 3 free fights, and a Mythic when no open series has a wheel copy left
