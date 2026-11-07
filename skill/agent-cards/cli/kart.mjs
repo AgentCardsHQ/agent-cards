@@ -16,12 +16,16 @@ import {
   REGION_NAMES, ROLE_NAMES, agentIdOf, agentLabel, apiProblem, ceilingProblem, chain, checkCall, decodeCall, describeCall, formatBnb, isLocalApi,
   parseBnb, problems, regionNumber, roleNumber,
 } from "./guard.mjs";
+import {
+  GITHUB_RELEASES, backupDir, downgradeProblem, escapingTarPath, extractTar, kartRuns, listTar, packageVersion, shouldNag, swapAndVerify, updateProblem,
+} from "./update.mjs";
 
-const VERSION = "0.23.1";
+const VERSION = "0.24.0";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
 const NEWS_FILE = path.join(CFG_DIR, "news.json"); // which news this agent has been shown, per server
+const UPDATE_FILE = path.join(CFG_DIR, "update.json"); // the newest version this agent has been nagged about, per server
 const readJson = (file) => {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -61,10 +65,13 @@ for (let i = 0; i < argv.length; i++) {
 
 class Done extends Error {}
 let whatsNew = null; // news from the site this agent hasn't been shown; the next good answer prints it, once
+let updateNag = null; // kart's own words about a new version (never the server's), added to `next` once per new version
 const out = (o, code = 0) => {
-  const news = o.ok === false ? null : takeNews();
+  const ok = o.ok !== false;
+  const news = ok ? takeNews() : null;
+  const body = ok && updateNag ? { ...o, next: o.next ? `${o.next} ${updateNag}` : updateNag } : o;
   // the news is the server's words under a key of its own; `next` is kart's
-  console.log(JSON.stringify(news ? { ...o, whatsNew: { news, next: "New since you last looked: tell your human in your next message. kart shows each item once." } } : o, null, 2));
+  console.log(JSON.stringify(news ? { ...body, whatsNew: { news, next: "New since you last looked: tell your human in your next message. kart shows each item once." } } : body, null, 2));
   process.exitCode = code;
   throw new Done();
 };
@@ -90,6 +97,23 @@ function takeNews() {
 function newsSeen() {
   const seen = readJson(NEWS_FILE)[API];
   return Array.isArray(seen) ? seen : [];
+}
+
+/** x-kart-latest, the server's version header: kart's own line about it, once per new version. Not shown unless
+ *  remembering it works, or every command on an old kart would repeat it. */
+function noteLatest(latest) {
+  if (updateNag || !latest) return;
+  const last = readJson(UPDATE_FILE)[API] ?? null;
+  if (!shouldNag(latest, VERSION, last)) return;
+  try {
+    const all = readJson(UPDATE_FILE);
+    all[API] = latest;
+    fs.mkdirSync(CFG_DIR, { recursive: true });
+    fs.writeFileSync(UPDATE_FILE, JSON.stringify(all, null, 2));
+  } catch {
+    return;
+  }
+  updateNag = `kart ${latest} is out: run kart update`;
 }
 
 function session() {
@@ -172,6 +196,7 @@ async function api(method, p, body, soft = false) {
       const j = await r.json().catch(() => null);
       if (j && r.ok && j.ok !== false) {
         await noteNews(r.headers.get("x-agent-news"));
+        noteLatest(r.headers.get("x-kart-latest"));
         return j;
       }
       if (!j) {
@@ -564,6 +589,20 @@ function writeOut(file, data) {
 /** " --card ID" when the command named its card, so a printed next step acts on the same card. */
 const cardArg = () => (cardFlag() ? ` --card ${cardFlag()}` : "");
 
+/** A sha256 from a .sha256 file at `url` (its first 64 hex characters), or null: no second source, however that
+ *  happened (network, 404, a file that isn't one). Used to check the package against the site and GitHub, never to
+ *  decide anything that spends. */
+async function fetchHash(url) {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return null;
+    const m = /^[0-9a-fA-F]{64}/.exec((await r.text()).trim());
+    return m ? m[0].toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
 const commands = {
   help: () =>
     out({
@@ -573,6 +612,7 @@ const commands = {
       commands: {
         "kart login": "sign in with one free signature from baw (moves no funds); lasts 30 days",
         "kart status": "your pre-registration, card and the server state",
+        "kart update": "download the newest kart from this site, check its sha256 against the site and the matching GitHub release (refuses on any mismatch, a missing second source or a downgrade), and install it in place; rolls back if the new one doesn't run. Your card, wallet and sign-in in ~/.agent-cards stay as they are",
         "kart join --region REGION [--role ROLE] [--ref CODE] [--lang zh]": "pre-register and pledge to a realm (west, east, north, south); prints the tweet to post and postLink, which opens X with it. --role picks the role your card page shows, until your post is verified; --lang zh writes the tweet in Chinese",
         "kart verify <tweet-url>": "verify your pre-registration tweet",
         "kart preview [--region REGION] [--role ROLE] [--out card.svg]": "your stats, class and rarity for each role, and a preview image",
@@ -1413,6 +1453,68 @@ const commands = {
       fn: "claim", season, amount, root: s.root, value: 0n,
     });
     out({ ok: true, sent: true, txHash: hash, season, amount: `${formatBnb(amount)} BNB`, next: "the BNB is in this wallet once the transaction is mined" });
+  },
+
+  /**
+   * Downloads the package from this kart's own site, checks its sha256 against two sources that must agree (the
+   * site's own agent-cards.tgz.sha256 and the GitHub release of the same version: never the site alone), refuses a
+   * downgrade, unpacks it to a temp folder (rejecting any path that would land outside it), runs the new kart's own
+   * `version` there, and only then backs up this install and swaps it in, rolling back if the installed copy
+   * doesn't run. ~/.agent-cards (the sign-in) is never touched. Never runs on its own: only this command does it.
+   */
+  async update() {
+    const refused = apiProblem(API);
+    if (refused) die(refused);
+    const pin = String(process.env.AGENT_CARDS_SHA256 || "").trim().toLowerCase() || null;
+    if (pin && !/^[0-9a-f]{64}$/.test(pin)) die("AGENT_CARDS_SHA256 must be a sha256: 64 hex characters");
+    let bytes;
+    try {
+      const r = await fetch(`${API}/skill/agent-cards.tgz`, { signal: AbortSignal.timeout(30000) });
+      if (!r.ok) die(`could not download the package (HTTP ${r.status})`);
+      bytes = Buffer.from(await r.arrayBuffer());
+    } catch (e) {
+      die(`could not reach the site: ${String(e?.message || e).slice(0, 160)}`);
+    }
+    const got = crypto.createHash("sha256").update(bytes).digest("hex");
+    const siteSha = await fetchHash(`${API}/skill/agent-cards.tgz.sha256`);
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agent-cards-update-"));
+    try {
+      const tgzFile = path.join(tmp, "agent-cards.tgz");
+      fs.writeFileSync(tgzFile, bytes);
+      const extractDir = path.join(tmp, "extract");
+      fs.mkdirSync(extractDir);
+      let names;
+      try {
+        names = listTar(tgzFile);
+      } catch (e) {
+        die(String(e.message).slice(0, 200));
+      }
+      const escaping = escapingTarPath(names, extractDir);
+      if (escaping) die(`the package contains a path that would land outside its folder: ${plain(escaping, 160)}`);
+      try {
+        extractTar(tgzFile, extractDir);
+      } catch (e) {
+        die(String(e.message).slice(0, 200));
+      }
+      const pkgDir = path.join(extractDir, "agent-cards");
+      if (!fs.existsSync(path.join(pkgDir, "cli", "kart.mjs"))) die("the package has no cli/kart.mjs: broken download");
+      const version = packageVersion(pkgDir);
+      const githubSha = version ? await fetchHash(`${GITHUB_RELEASES}/v${version}/agent-cards.tgz.sha256`) : null;
+      const problem = updateProblem({ got, site: siteSha, github: githubSha, pin }) || downgradeProblem(version, VERSION);
+      if (problem) die(problem);
+      if (!kartRuns(pkgDir)) die(`kart ${version} doesn't run on this machine: refusing to install it`);
+      let backup;
+      const result = await swapAndVerify({
+        backup: async () => ((backup = backupDir(SKILL_DIR)), backup.restore),
+        install: async () => fs.cpSync(pkgDir, SKILL_DIR, { recursive: true }),
+        verify: async () => kartRuns(SKILL_DIR),
+        cleanup: async () => backup.cleanup(),
+      });
+      if (!result.ok) die(`kart ${version} didn't run once installed, and was rolled back to ${VERSION}${result.error ? `: ${plain(result.error, 160)}` : ""}`);
+      out({ ok: true, updated: true, from: VERSION, to: version, next: "run any command; your card, wallet and sign-in in ~/.agent-cards stay as they are" });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   },
 
   version: () => out({ ok: true, version: VERSION, api: API }),
