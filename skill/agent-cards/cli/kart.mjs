@@ -22,7 +22,7 @@ import {
   GITHUB_RELEASES, backupDir, downgradeProblem, escapingTarPath, extractTar, kartRuns, listTar, packageVersion, shouldNag, swapAndVerify, updateProblem,
 } from "./update.mjs";
 
-const VERSION = "0.25.0";
+const VERSION = "0.26.0";
 const CFG_DIR = process.env.AGENT_CARDS_HOME || path.join(os.homedir(), ".agent-cards");
 const CFG_FILE = path.join(CFG_DIR, "config.json");
 const SESSION_FILE = path.join(CFG_DIR, "session.json"); // one session token per server; never printed
@@ -638,7 +638,7 @@ const STAKE_HELP = {
   "kart stake [--card ID]": "staked duels: your balance in the StakedDuels contract, the allowed stakes, how many wait on the open table, your waiting intents, the challenges to you (signed in) and your card's open staked duel, from the server and the chain",
   "kart stake deposit --bnb X [--yes --max-bnb X]": "simulate moving BNB from your wallet into your balance in the StakedDuels contract, which staked duels take their stakes from (costs BNB: ask your human); --yes with --max-bnb sends it",
   "kart stake withdraw [--bnb X] [--yes]": "simulate taking BNB from that balance back to your wallet (without --bnb, all of it that isn't in a duel; gas only); --yes sends it",
-  "kart stake join [--card ID] [--stake BNB] [--yes --max-bnb X]": "check putting your card on the open table at one allowed stake (the smallest without --stake): it signs and sends nothing. --yes with --max-bnb at or above the stake signs a free intent (it lasts 9 minutes) and sends it to the server. Once paired, both stakes lock in the contract and the winner takes them, minus 7.5% from each side (a lost duel costs the stake: ask your human). Each duel needs your human's OK and its own run",
+  "kart stake join [--card ID] [--stake BNB] [--yes --max-bnb X]": "check putting your card on the open table at one allowed stake (the smallest without --stake): it signs and sends nothing. --yes with --max-bnb at or above the stake signs a free intent (it lasts 24 hours, and the duel can start any time until then, with no further OK) and sends it to the server. Once paired, both stakes lock in the contract and the winner takes them, minus 7.5% from each side (a lost duel costs the stake: ask your human). Each duel needs your human's OK and its own run",
   "kart stake challenge <card-id> [--card ID] [--stake BNB] [--yes --max-bnb X]": "the same, naming one opponent: it pairs only when that card's holder challenges one of your cards back at the same stake (kart stake shows them the challenge)",
   "kart stake watch <duel>": "a staked duel's rounds as they are revealed (one every 5 s) and its result; waits up to 2.5 minutes for the end",
   "kart stake refund <duel> [--yes]": "simulate refunding a staked duel that wasn't settled in time (its number on chain, from kart stake watch or kart stake): each stake goes back to its balance (gas only); --yes sends it",
@@ -1692,7 +1692,7 @@ async function myCard() {
 const STAKE_USAGE = "usage: kart stake [status [--card ID] | deposit --bnb X | withdraw [--bnb X] | join [--card ID] [--stake BNB] [--max-bnb X] | challenge <card-id> [--card ID] [--stake BNB] [--max-bnb X] | watch <duel> | refund <duel> | cancel [<intent>]] [--yes]";
 const ZERO = "0x0000000000000000000000000000000000000000";
 const sameAddr = (x, y) => String(x ?? "").toLowerCase() === String(y ?? "").toLowerCase();
-const INTENT_SECONDS = 540; // what kart signs: 9 minutes, under the 10 the server and guard.mjs allow, so a clock a little off still fits
+const INTENT_SECONDS = 86_400; // what kart signs: 24 hours, 10 minutes under what the server and guard.mjs allow, so a clock a little off still fits
 // kart stake watch waits this long for a duel's end: its reveal (up to 80 s) and then the settle, which the server sends
 // only once the last round is out (~90 s after the lock in all; ~150 s if the request's driver was lost to the cron)
 const WATCH_MS = (DEV && Number(process.env.AGENT_CARDS_WATCH_MS)) || 150_000; // tests shorten it
@@ -1861,7 +1861,7 @@ async function stakeWithdraw() {
 /**
  * kart stake join (the open table) and challenge (`named`: the holder of the card named, read from the chain). The
  * card, stake, opponent and contract come from the command and the chain, never from the server; the Intent is built
- * here, checked by guard.mjs (exact type and domain, at most 10 minutes) and, with --yes under the human's --max-bnb
+ * here, checked by guard.mjs (exact type and domain, at most 24 hours) and, with --yes under the human's --max-bnb
  * (each duel its own run), signed through baw, then posted. Without --yes it stops after the checks.
  */
 async function stakeIntent(named) {
@@ -1895,8 +1895,9 @@ async function stakeIntent(named) {
   const wrong = intentProblems(typedData, { card, stake, opponent }, ctx, nowS);
   if (wrong.length) die("not signing: the intent doesn't match this command", { problems: wrong });
   const amt = formatBnb(stake);
+  const lasts = "a free intent that lasts 24 hours: the duel can start any time until then, with no further OK";
   const plan = {
-    does: named ? `challenge card #${target}'s holder with card #${card} at ${amt} BNB a side, with a free intent that lasts 9 minutes` : `put card #${card} on the open table at ${amt} BNB a side, with a free intent that lasts 9 minutes`,
+    does: named ? `challenge card #${target}'s holder with card #${card} at ${amt} BNB a side, with ${lasts}` : `put card #${card} on the open table at ${amt} BNB a side, with ${lasts}`,
     pays: `${amt} BNB from this wallet's balance in the StakedDuels contract, once paired`,
   };
   if (!flags.yes) {

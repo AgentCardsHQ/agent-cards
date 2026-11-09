@@ -10,7 +10,7 @@
 // contract holds for exactly this wallet and amount. Staked duels: kart builds their four transactions itself
 // (deposit, withdraw, refundTimeout, cancelIntent), only for the StakedDuels contract baked in next to the others, and
 // the Intent it signs must be exactly the contract's type, for this wallet, card, stake and opponent, lasting at most
-// 10 minutes. No dependencies (Node 20+), so the selectors and argument layouts are fixed here and a unit test checks
+// 24 hours. No dependencies (Node 20+), so the selectors and argument layouts are fixed here and a unit test checks
 // them against the contract ABIs.
 
 export const SELECTORS = {
@@ -452,7 +452,7 @@ function proofIn(w) {
 
 // ---- staked duels: the Intent kart signs and the four transactions it builds (contracts/StakedDuels.sol)
 
-export const INTENT_MAX_SECONDS = 600; // an Intent lasts at most 10 minutes (the owner's rule, 8 Nov 2026; the server's too)
+export const INTENT_MAX_SECONDS = 87_000; // an Intent lasts at most 24 hours, plus 10 minutes for a clock a little off (the owner's rule, 9 Nov 2026; the server's too)
 const DOMAIN_FIELDS = [{ name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }];
 const INTENT_FIELDS = Object.entries(INTENT).map(([name, type]) => ({ name, type }));
 const DOMAIN_TYPE = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
@@ -478,7 +478,7 @@ export function intentTypedData(ctx, v) {
 /**
  * What is wrong with typed data kart is about to sign as an Intent: it must be exactly the contract's type and domain
  * (this kart's StakedDuels and chain), for this wallet, with the card, stake and opponent the command means (`expect`:
- * { card, stake, opponent }, opponent 0 for the open table), and expire after `nowS` but at most 10 minutes later.
+ * { card, stake, opponent }, opponent 0 for the open table), and expire after `nowS` but at most 24 hours later.
  */
 export function intentProblems(td, expect, ctx, nowS = Math.floor(Date.now() / 1000)) {
   if (!ctx.staked) return ["this kart has no StakedDuels contract address (release.json)"];
@@ -500,7 +500,7 @@ export function intentProblems(td, expect, ctx, nowS = Math.floor(Date.now() / 1
   if (!same(m.opponent, expect.opponent || ZERO)) bad.push(expect.opponent && !same(expect.opponent, ZERO) ? "its opponent isn't the named card's holder" : "it names an opponent, but the open table names none");
   const left = Number(m.expiry) - nowS;
   if (left <= 0) bad.push("it has already expired");
-  if (left > INTENT_MAX_SECONDS) bad.push(`it lasts ${left} s, over the ${INTENT_MAX_SECONDS / 60} minutes an intent may last`);
+  if (left > INTENT_MAX_SECONDS) bad.push(`it lasts ${left} s, over the 24 hours an intent may last`);
   return bad;
 }
 
