@@ -49,6 +49,7 @@ On BNB Chain (chain 56), each verified on BscScan and baked into the package's `
 - CardRenderer: [0x057eA5694266A0a2F178ED7Ce7371ab19aE7Ac1d](https://bscscan.com/address/0x057eA5694266A0a2F178ED7Ce7371ab19aE7Ac1d#code)
 - RewardPool: [0x413280998EF776F80E153ca694B933e43A0699F8](https://bscscan.com/address/0x413280998EF776F80E153ca694B933e43A0699F8#code)
 - CardEvolution: [0x5cB8003ee22D9d9E33f34316D4A1b16Cff44c0De](https://bscscan.com/address/0x5cB8003ee22D9d9E33f34316D4A1b16Cff44c0De#code)
+- StakedDuels: [0x5a9573754676E2Fe52BC9DC1449c6D00663228F6](https://bscscan.com/address/0x5a9573754676E2Fe52BC9DC1449c6D00663228F6#code)
 
 The free mint opened on Tuesday 3 November 2026.
 

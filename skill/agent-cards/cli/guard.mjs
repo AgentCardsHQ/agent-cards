@@ -7,8 +7,11 @@
 // the server holds the key that signs mints; and a preview describes the transaction from its own calldata, never
 // with the server's words. baw's simulation then has to show that payment and nothing else leaving the wallet. A
 // season pool claim must go to the RewardPool contract baked in next to it, and its proof must lead to the root that
-// contract holds for exactly this wallet and amount. No dependencies (Node 20+), so the selectors and argument
-// layouts are fixed here and a unit test checks them against the contract ABIs.
+// contract holds for exactly this wallet and amount. Staked duels: kart builds their four transactions itself
+// (deposit, withdraw, refundTimeout, cancelIntent), only for the StakedDuels contract baked in next to the others, and
+// the Intent it signs must be exactly the contract's type, for this wallet, card, stake and opponent, lasting at most
+// 10 minutes. No dependencies (Node 20+), so the selectors and argument layouts are fixed here and a unit test checks
+// them against the contract ABIs.
 
 export const SELECTORS = {
   buy: "0xd96a094a", // buy(uint256)
@@ -21,6 +24,10 @@ export const SELECTORS = {
   claimMythic: "0xf2199b82", // claimMythic(MythicClaim,bytes)
   claim: "0xae0b51df", // RewardPool.claim(uint256,uint256,bytes32[])
   evolve: "0xd9be9c36", // CardEvolution.evolve(Voucher,bytes)
+  deposit: "0xd0e30db0", // StakedDuels.deposit()
+  withdraw: "0x2e1a7d4d", // StakedDuels.withdraw(uint256)
+  refundTimeout: "0xda29af33", // StakedDuels.refundTimeout(uint256)
+  cancelIntent: "0xceee6ee3", // StakedDuels.cancelIntent(Intent)
 };
 export const READS = {
   priceOf: "0xb9186d7d", // priceOf(uint256)
@@ -35,10 +42,28 @@ export const READS = {
   stageOf: "0xc7d25b15", // CardEvolution.stageOf(uint256)
   sideOf: "0x3576de3a", // CardEvolution.sideOf(uint256): 1 Light, 2 Dark, 0 before the first evolution
   maxPrice: "0x7229aa80", // CardEvolution.maxPrice(uint8): the most a stage can cost, 0 while it is closed
+  balanceOf: "0x70a08231", // StakedDuels.balanceOf(address): a wallet's free balance there
+  stakeAllowed: "0x3229854e", // StakedDuels.stakeAllowed(uint256)
+  usedIntent: "0xd88ee47a", // StakedDuels.usedIntent(bytes32): used by a duel or cancelled
+  openDuelOfCard: "0xdea5cc36", // StakedDuels.openDuelOfCard(uint256): 0 when the card is in no open duel
+  duels: "0x859a62d0", // StakedDuels.duels(uint256)
+  paused: "0x5c975abb", // StakedDuels.paused()
+  maxBalance: "0x73ad468a", // StakedDuels.maxBalance(): the most one wallet may hold there
 };
 const ON_POOL = new Set(["claim"]); // functions of RewardPool
-const ON_EVOLUTION = new Set(["evolve"]); // functions of CardEvolution; every other one is AgentCards'
+const ON_EVOLUTION = new Set(["evolve"]); // functions of CardEvolution
+// the only functions kart sends to StakedDuels; every other function kart knows is AgentCards'
+export const ON_STAKED = new Set(["deposit", "withdraw", "refundTimeout", "cancelIntent"]);
 const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const ZERO = "0x0000000000000000000000000000000000000000";
+
+/** The contract a function kart sends must go to, from `ctx` (the addresses baked into this skill), and its name. */
+export function contractFor(fn, ctx) {
+  if (ON_POOL.has(fn)) return [ctx.pool, "RewardPool"];
+  if (ON_EVOLUTION.has(fn)) return [ctx.evolution, "CardEvolution"];
+  if (ON_STAKED.has(fn)) return [ctx.staked, "StakedDuels"];
+  return [ctx.cards, "Agent Cards"];
+}
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 
 /** True for an API on this machine (a dev server), where plain http is fine. */
@@ -106,6 +131,8 @@ const labelText = (label) => String(label ?? "").replace(/[^a-z0-9_-]/g, "?").sl
  * The arguments of every function kart sends, as the ABI lays them out: static words, bytes and string, bytes32[]
  * and tuples of those (an object, its fields in order). A unit test checks them against the contract ABIs.
  */
+/** StakedDuels' Intent, as the contract hashes and takes it. */
+export const INTENT = { player: "address", cardId: "uint256", stake: "uint256", opponent: "address", nonce: "uint256", expiry: "uint64" };
 export const ARGS = {
   buy: ["uint256"],
   buyMythic: ["uint256"],
@@ -123,6 +150,10 @@ export const ARGS = {
   claimMythic: [{ to: "address", design: "uint256", nonce: "uint256", expiry: "uint64" }, "bytes"],
   claim: ["uint256", "uint256", "bytes32[]"],
   evolve: [{ holder: "address", id: "uint256", stage: "uint8", side: "uint8", price: "uint256", expiry: "uint64" }, "bytes"],
+  deposit: [],
+  withdraw: ["uint256"],
+  refundTimeout: ["uint256"],
+  cancelIntent: [INTENT],
 };
 const BITS = { address: 160n, uint8: 8n, uint16: 16n, uint32: 32n, uint64: 64n, uint256: 256n };
 const isDynamic = (t) => t === "bytes" || t === "string" || t === "bytes32[]" || (typeof t === "object" && Object.values(t).some(isDynamic));
@@ -212,12 +243,13 @@ const same = (a, b) => String(a ?? "").toLowerCase() === String(b ?? "").toLower
 /**
  * What is wrong with a transaction the server built, against what this command means to do.
  * `expect`: { fn, value (wei), and per function: id, design, packs, price; for mint: label (this Agent ID), role and,
- * when the human named one, region; for claim: season, amount and the root the pool holds on chain }.
- * `ctx`: { cards, pool, wallet }.
+ * when the human named one, region; for claim: season, amount and the root the pool holds on chain; for withdraw:
+ * amount; for refundTimeout: duel; for cancelIntent: intent, the one this wallet signed }.
+ * `ctx`: { cards, pool, evolution, staked, wallet }.
  */
 export function checkCall(tx, expect, ctx) {
   const bad = [];
-  const [target, name] = ON_POOL.has(expect.fn) ? [ctx.pool, "RewardPool"] : ON_EVOLUTION.has(expect.fn) ? [ctx.evolution, "CardEvolution"] : [ctx.cards, "Agent Cards"];
+  const [target, name] = contractFor(expect.fn, ctx);
   if (!target) return [`this kart has no ${name} contract address (release.json): reinstall the skill`];
   if (!same(tx?.to, target)) bad.push(`it goes to ${tx?.to}, not the ${name} contract ${target}`);
   const call = decodeCall(tx?.calldata);
@@ -293,6 +325,27 @@ export function checkCall(tx, expect, ctx) {
       signed(arg(1));
       break;
     }
+    // StakedDuels: kart builds these itself, and they still pass here. deposit is the only one that carries BNB: exactly
+    // the --bnb amount (the value check below); the others carry none
+    case "deposit":
+      if (!(BigInt(expect.value) > 0n)) bad.push("a deposit needs an amount above 0");
+      break;
+    case "withdraw":
+      want("amount", arg(0), expect.amount);
+      if (arg(0) === 0n) bad.push("a withdrawal needs an amount above 0");
+      break;
+    case "refundTimeout":
+      want("duel", arg(0), expect.duel);
+      break;
+    case "cancelIntent": {
+      // only an intent this wallet signed, exactly as kart kept it
+      const v = arg(0);
+      const e = expect.intent || {};
+      if (!same(addr(v.player), ctx.wallet)) bad.push("the intent isn't this wallet's");
+      for (const k of ["cardId", "stake", "nonce", "expiry"]) want(k, v[k], e[k]);
+      if (!same(addr(v.opponent), e.opponent || ZERO)) bad.push("its opponent isn't the one this wallet signed for");
+      break;
+    }
     default:
       bad.push(`no rule for ${expect.fn}`);
   }
@@ -352,6 +405,14 @@ export function describeCall(calldata, value = null) {
     }
     case "claim":
       return { does: `claim ${bnb(b)} from the season ${a} reward pool`, season: Number(a), amount: bnb(b) };
+    case "deposit":
+      return { does: `deposit ${value === null ? "BNB" : bnb(value)} into this wallet's balance in the StakedDuels contract`, ...paid };
+    case "withdraw":
+      return { does: `withdraw ${bnb(a)} from this wallet's balance in the StakedDuels contract to this wallet`, amount: bnb(a) };
+    case "refundTimeout":
+      return { does: `refund staked duel #${a} on chain: each side's stake goes back to its balance in the contract`, duel: String(a) };
+    case "cancelIntent":
+      return { does: `cancel this wallet's signed intent for card #${a.cardId} at ${bnb(a.stake)}, so it can never lock a stake`, card: String(a.cardId), stake: bnb(a.stake) };
     default:
       return { does: call.fn };
   }
@@ -387,6 +448,99 @@ function proofIn(w) {
   const len = w[at];
   if (len === undefined || len > 256n || w.length < at + 1 + Number(len)) return null;
   return w.slice(at + 1, at + 1 + Number(len)).map((x) => `0x${word(x)}`);
+}
+
+// ---- staked duels: the Intent kart signs and the four transactions it builds (contracts/StakedDuels.sol)
+
+export const INTENT_MAX_SECONDS = 600; // an Intent lasts at most 10 minutes (the owner's rule, 8 Nov 2026; the server's too)
+const DOMAIN_FIELDS = [{ name: "name", type: "string" }, { name: "version", type: "string" }, { name: "chainId", type: "uint256" }, { name: "verifyingContract", type: "address" }];
+const INTENT_FIELDS = Object.entries(INTENT).map(([name, type]) => ({ name, type }));
+const DOMAIN_TYPE = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
+const INTENT_TYPE = `Intent(${INTENT_FIELDS.map((f) => `${f.type} ${f.name}`).join(",")})`;
+const isAddress = (a) => /^0x[0-9a-fA-F]{40}$/.test(String(a ?? ""));
+const fits = (x, bits) => /^\d{1,78}$/.test(String(x ?? "")) && BigInt(x) < 1n << bits;
+
+/**
+ * The EIP-712 message baw signs for an Intent: StakedDuels version 1 on `ctx.stakedChain` at `ctx.staked` (the address
+ * baked into this skill, never one the server names), numbers as decimal strings, as eth_signTypedData_v4 takes them.
+ */
+export function intentTypedData(ctx, v) {
+  return {
+    types: { EIP712Domain: DOMAIN_FIELDS, Intent: INTENT_FIELDS },
+    primaryType: "Intent",
+    domain: { name: "StakedDuels", version: "1", chainId: Number(ctx.stakedChain), verifyingContract: ctx.staked },
+    message: {
+      player: v.player, cardId: String(v.cardId), stake: String(v.stake), opponent: v.opponent || ZERO, nonce: String(v.nonce), expiry: String(v.expiry),
+    },
+  };
+}
+
+/**
+ * What is wrong with typed data kart is about to sign as an Intent: it must be exactly the contract's type and domain
+ * (this kart's StakedDuels and chain), for this wallet, with the card, stake and opponent the command means (`expect`:
+ * { card, stake, opponent }, opponent 0 for the open table), and expire after `nowS` but at most 10 minutes later.
+ */
+export function intentProblems(td, expect, ctx, nowS = Math.floor(Date.now() / 1000)) {
+  if (!ctx.staked) return ["this kart has no StakedDuels contract address (release.json)"];
+  const bad = [];
+  if (JSON.stringify(td?.types) !== JSON.stringify({ EIP712Domain: DOMAIN_FIELDS, Intent: INTENT_FIELDS }) || td?.primaryType !== "Intent") bad.push("it isn't exactly the contract's Intent type");
+  const d = td?.domain || {};
+  if (Object.keys(d).join() !== "name,version,chainId,verifyingContract" || d.name !== "StakedDuels" || d.version !== "1") bad.push("its domain isn't StakedDuels version 1");
+  if (Number(d.chainId) !== Number(ctx.stakedChain)) bad.push(`its chain is ${d.chainId}, not ${ctx.stakedChain}`);
+  if (!same(d.verifyingContract, ctx.staked)) bad.push("it names another contract than the StakedDuels contract in this kart");
+  const m = td?.message || {};
+  if (Object.keys(m).join() !== Object.keys(INTENT).join()) return [...bad, "its fields aren't exactly the Intent's"];
+  if (!isAddress(m.player) || !isAddress(m.opponent) || !["cardId", "stake", "nonce"].every((k) => fits(m[k], 256n)) || !fits(m.expiry, 64n)) {
+    return [...bad, "it has a value that doesn't fit its type"];
+  }
+  if (!same(m.player, ctx.wallet)) bad.push("it signs for another wallet");
+  if (expect.card === undefined || BigInt(m.cardId) !== BigInt(expect.card)) bad.push(`its card is ${m.cardId}, not ${expect.card}`);
+  if (expect.stake === undefined || BigInt(m.stake) !== BigInt(expect.stake)) bad.push(`its stake is ${formatBnb(m.stake)} BNB, not ${expect.stake === undefined ? "?" : formatBnb(expect.stake)}`);
+  if (BigInt(m.stake) === 0n) bad.push("its stake is 0");
+  if (!same(m.opponent, expect.opponent || ZERO)) bad.push(expect.opponent && !same(expect.opponent, ZERO) ? "its opponent isn't the named card's holder" : "it names an opponent, but the open table names none");
+  const left = Number(m.expiry) - nowS;
+  if (left <= 0) bad.push("it has already expired");
+  if (left > INTENT_MAX_SECONDS) bad.push(`it lasts ${left} s, over the ${INTENT_MAX_SECONDS / 60} minutes an intent may last`);
+  return bad;
+}
+
+/** The digest the contract's intentDigest gives for typed data from intentTypedData: what the wallet really signs. */
+export function intentDigest(td) {
+  const { domain: d, message: m } = td;
+  const h = (t) => keccak256(t).slice(2);
+  const separator = keccak256(hexBytes(h(DOMAIN_TYPE) + h(d.name) + h(d.version) + word(d.chainId) + word(BigInt(d.verifyingContract))));
+  const struct = keccak256(hexBytes(h(INTENT_TYPE) + word(BigInt(m.player)) + word(m.cardId) + word(m.stake) + word(BigInt(m.opponent)) + word(m.nonce) + word(m.expiry)));
+  return keccak256(hexBytes(`1901${separator.slice(2)}${struct.slice(2)}`));
+}
+
+const HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0n; // the contract (OpenZeppelin) refuses s above it
+
+/**
+ * The 65-byte signature (0x + r, s, v) the contract takes, from what baw gives: r and s as 128 hex characters without
+ * 0x plus a separate recovery id ("00" or "01", to which 27 is added), or already 0x + 130 hex. Null for anything else,
+ * or for a high s the contract would refuse.
+ */
+export function joinSig(signature, recovery) {
+  const h = String(signature ?? "").trim().replace(/^0x/i, "");
+  let body;
+  let v;
+  if (/^[0-9a-f]{130}$/i.test(h)) [body, v] = [h.slice(0, 128), parseInt(h.slice(128), 16)];
+  else if (/^[0-9a-f]{128}$/i.test(h)) {
+    const t = String(recovery ?? "").trim().toLowerCase();
+    body = h;
+    v = /^\d{1,2}$/.test(t) ? Number(t) : /^(0x)?[0-9a-f]{1,2}$/.test(t) ? parseInt(t.replace(/^0x/, ""), 16) : NaN;
+  } else return null;
+  if (v === 0 || v === 1) v += 27;
+  if (v !== 27 && v !== 28) return null;
+  if (BigInt(`0x${body.slice(0, 64)}`) === 0n || BigInt(`0x${body.slice(64)}`) > HALF_N) return null;
+  return `0x${body.toLowerCase()}${v.toString(16)}`;
+}
+
+/** Calldata for one of the four StakedDuels functions kart sends, built here from its fixed layout (all static words). */
+export function stakedCall(fn, args = []) {
+  if (!ON_STAKED.has(fn)) throw new Error(`kart sends no ${fn} to StakedDuels`);
+  const enc = (t, v) => (typeof t === "object" ? Object.keys(t).map((k) => enc(t[k], v[k])).join("") : word(t === "address" ? BigInt(v) : v));
+  return SELECTORS[fn] + ARGS[fn].map((t, i) => enc(t, args[i])).join("");
 }
 
 /**
@@ -550,4 +704,29 @@ export const chain = {
     return { root: `0x${u256(wordOf(r, 0))}`, funded: wordOf(r, 1), claimed: wordOf(r, 2), claimEnds: Number(wordOf(r, 3)), swept: wordOf(r, 4) === 1n };
   },
   poolClaimed: async (rpc, pool, season, wallet) => wordOf(await ethCall(rpc, pool, READS.claimed + u256(season) + u256(BigInt(wallet))), 0) === 1n,
+  // StakedDuels: a wallet's free balance, the cap, the pause, the allowed stakes, used intents and the duels
+  stakedBalance: async (rpc, staked, wallet) => wordOf(await ethCall(rpc, staked, READS.balanceOf + u256(BigInt(wallet))), 0),
+  stakedMaxBalance: async (rpc, staked) => wordOf(await ethCall(rpc, staked, READS.maxBalance), 0),
+  stakedPaused: async (rpc, staked) => wordOf(await ethCall(rpc, staked, READS.paused), 0) === 1n,
+  stakeAllowed: async (rpc, staked, wei) => wordOf(await ethCall(rpc, staked, READS.stakeAllowed + u256(wei)), 0) === 1n,
+  intentUsed: async (rpc, staked, digest) => wordOf(await ethCall(rpc, staked, READS.usedIntent + u256(BigInt(digest))), 0) === 1n,
+  openDuelOfCard: async (rpc, staked, id) => wordOf(await ethCall(rpc, staked, READS.openDuelOfCard + u256(id)), 0),
+  stakedDuel: async (rpc, staked, id) => {
+    const r = await ethCall(rpc, staked, READS.duels + u256(id));
+    return {
+      playerA: addr(wordOf(r, 0)), playerB: addr(wordOf(r, 1)), cardA: wordOf(r, 2), cardB: wordOf(r, 3), stake: wordOf(r, 4),
+      lockBlock: Number(wordOf(r, 5)), deadline: Number(wordOf(r, 6)), status: Number(wordOf(r, 7)), // 0 none, 1 locked, 2 settled, 3 refunded
+    };
+  },
+  blockNumber: async (rpc) => {
+    const r = await fetch(rpc, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
+      signal: AbortSignal.timeout(20000),
+    });
+    const j = await r.json().catch(() => null);
+    if (!/^0x[0-9a-fA-F]{1,16}$/.test(String(j?.result))) throw new Error(`could not read the chain (${rpc}): ${j?.error?.message || "no block number"}`);
+    return Number(BigInt(j.result));
+  },
 };
